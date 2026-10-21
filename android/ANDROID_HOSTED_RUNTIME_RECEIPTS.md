@@ -1,8 +1,9 @@
 # Hosted Android native runtime probe
 
-Prepared 2026-10-21. This receipt verifies CI preparation only. No hosted Android
-run has completed in this receipt; Android native acceptance remains unverified.
-The existing Windows host parser result does not establish Android JNI behavior.
+Prepared and executed 2026-10-21. The actual Android AAR accepts the production
+empty baseline after the slash-encoding fix and returns the `AUTOPILOT` selector
+as `REJECT`. This is an Android JNI/configuration probe, with no TUN or provider
+connection. It does not establish phone traffic, routing or app-update installation.
 
 ## Runnable hosted probe
 
@@ -22,7 +23,8 @@ gradle -p "$AUTOPILOT_ANDROID_DIR" --no-daemon --console=plain \
   -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest
 ```
 
-The fixture submits the exact empty `VpnEngine.configuration()` baseline to the
+The fixture submits the exact empty `VpnEngine.configuration()` baseline, encoded
+by the production `CoreConfigEncoding.encode` writer, to the
 actual Android AAR `Clash.quickSetup`, checks its raw return value, then verifies
 the native `AUTOPILOT` selector through `getProxies`. It requests no VPN consent,
 starts no TUN, and contains no account or provider data. The exact submitted
@@ -85,7 +87,94 @@ Primary setup references:
 
 ## Hosted execution evidence
 
-Pending root-owned publication/dispatch. Append the run URL, exact source commit,
-downloadable artifact, device API/ABI/page size, JUnit runner tail and raw native
-fixture result here after completion. A failed native baseline is diagnostic
-evidence, not a successful Android integration claim.
+Evidence was fetched through the GitHub connector. The artifact ZIP was read in
+memory; its JUnit XML, Gradle tail, device-property files and logcat were inspected.
+No account data or live provider profiles are included.
+
+| Run | Result | Evidence |
+| --- | --- | --- |
+| [39601339601](https://github.com/gohrayson/autopilot-android/actions/runs/39601339601) | CI provisioning failed, exit 127; native test did not run | `sdkmanager` was missing from PATH. Added `android-actions/setup-android@v3` before the SDK/build step. |
+| [39601782528](https://github.com/gohrayson/autopilot-android/actions/runs/39601782528) | Native empty baseline rejected | Actual Android JSON bytes contained optional `\/` escapes; YAML parsing returned `yaml: found unknown escape character`. |
+| [39603051050](https://github.com/gohrayson/autopilot-android/actions/runs/39603051050) | Passed | Same fixed fixture now uses the production encoder, is accepted by the actual Android core, and reports selector `REJECT`. |
+
+The initial SDK failure's `ci-native-results/sdk-install.log` contains:
+
+```text
+/home/runner/work/_temp/6c8e336d-b3dc-48ee-9dbb-38d8a562d428.sh: line 10: sdkmanager: command not found
+```
+
+The native-rejection run used commit
+`b78daf1616fcefb82dfb5136d5b5263952dceca8`. Its artifact is
+[native-core-api35-39601782528-1](https://github.com/gohrayson/autopilot-android/actions/runs/39601782528/artifacts/12346457393).
+The actual JUnit failure preserved these credential-free fields:
+
+```text
+SDK=35 ABI=x86_64 bytes=623 sha256=84a600e2d5594f75694b69c9b6e7c868926d08eca8fa5ff96376b2b90f36260e
+RAW_NATIVE_RESULT=yaml: found unknown escape character
+```
+
+The rejected profile contained `"fake-ip-range":"198.18.0.1\/16"` and
+`"nameserver":["https:\/\/1.1.1.1\/dns-query", ...]`. Android's `JSONObject`
+emits these valid JSON escapes; the core reads `config.yaml` using YAML, whose
+double-quoted scalar grammar rejects `\/`. The earlier desktop/JVM JSON serializer
+did not emit these escapes, so its passing host-parser probe missed the defect.
+`CoreConfigEncoding` consumes escape pairs atomically and removes only optional
+slash escapes, preserving literal backslashes and string values. `VpnEngine`
+and `NativeCoreConfigTest` both call this same encoder.
+
+Successful source commit:
+[`742c5f4045628848798bf981ae095fcc458c0736`](https://github.com/gohrayson/autopilot-android/commit/742c5f4045628848798bf981ae095fcc458c0736).
+Job: [119232150825](https://github.com/gohrayson/autopilot-android/actions/runs/39603051050/job/119232150825).
+Artifact: [native-core-api35-39603051050-1](https://github.com/gohrayson/autopilot-android/actions/runs/39603051050/artifacts/12346866988),
+68,897 bytes, SHA-256
+`b9a6cdfda923a25990c95c4a4ea1760d495e266e20a848e37b0d234b5e3aff85`
+(downloaded ZIP hash matched GitHub's artifact digest). The artifact expires on
+2026-10-28; the excerpts below retain the decisive evidence.
+
+Device property files and helper exit status, verbatim:
+
+```text
+device-api.txt: 35
+device-abi.txt: x86_64
+device-pagesize.txt: 4096
+exit-status.txt: instrumentation_exit=0
+```
+
+Exact runner invocation is the `gradle ... :app:connectedDebugAndroidTest` command
+above, issued by `bash "$AUTOPILOT_ANDROID_DIR/tools/ci-native-check.sh" "$AUTOPILOT_ANDROID_DIR"`.
+Verbatim test-runner tail from `ci-native-results/native-core-gradle.log`:
+
+```text
+> Task :app:connectedDebugAndroidTest
+Starting 1 tests on emulator-5554 - 15
+
+Finished 1 tests on emulator-5554 - 15
+```
+
+Final runner result and independent XML check:
+
+```text
+BUILD SUCCESSFUL in 18s
+64 actionable tasks: 1 executed, 63 up-to-date
+NATIVE_CORE_XML_RECEIPT tests=1 failures=0 errors=0 skipped=0
+```
+
+The actual `TEST-emulator-5554 - 15-_app-.xml` confirms the selected method:
+
+```xml
+<testsuite name="app.autopilot.android.NativeCoreConfigTest" tests="1" failures="0" errors="0" skipped="0" time="0.745" timestamp="2026-10-21T12:54:20" hostname="localhost">
+  <testcase name="emptyProductionBaselineIsAcceptedByActualAndroidCore" classname="app.autopilot.android.NativeCoreConfigTest" time="0.05" />
+</testsuite>
+```
+
+Decisive `ci-native-results/logcat.txt` lines:
+
+```text
+10-21 12:54:19.847  2304  2329 I libclash: Initial configuration complete, total time: 5ms
+10-21 12:54:19.921  2304  2325 I System.out: AUTOPILOT_NATIVE_BASELINE_ACCEPTED selector=REJECT SDK=35 ABI=x86_64
+```
+
+Scope: actual `libclash.so` loaded, production baseline bytes parsed, native
+`quickSetup` returned success, and `getProxies` returned `AUTOPILOT.now=REJECT`.
+No TUN permission, routed traffic, live provider connection, ARM64/16 KB guest,
+HyperOS phone connection, or Android package-update installation was exercised.

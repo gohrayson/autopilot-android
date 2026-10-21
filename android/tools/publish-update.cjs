@@ -56,7 +56,10 @@ function verifyApkMetadata(apksignerOutput, badging, version) {
   const certificates = [...apksignerOutput.matchAll(/Signer #(\d+) certificate SHA-256 digest:\s*([a-fA-F0-9]+)/g)];
   if (certificates.length !== 1 || certificates[0][2].toLowerCase() !== CERTIFICATE) fail('APK signer differs from the installed Autopilot release certificate.');
   const info = badging.match(/^package: name='([^']+)' versionCode='(\d+)' versionName='([^']+)'/m);
-  const min = badging.match(/^sdkVersion:'(\d+)'/m);
+  // aapt2 35 emits minSdkVersion; older aapt emits sdkVersion. Require one
+  // declaration across both spellings so duplicate/conflicting metadata fails.
+  const sdkLines = badging.split(/\r?\n/).filter(line => /^(?:minSdkVersion|sdkVersion):/.test(line));
+  const min = sdkLines.length === 1 ? sdkLines[0].match(/^(?:minSdkVersion|sdkVersion):'(\d+)'$/) : null;
   if (!info || !min || info[1] !== version.packageName || Number(info[2]) !== version.versionCode || info[3] !== version.versionName || Number(min[1]) !== version.minSdk) fail('Signed APK package/version/minSdk does not match app/build.gradle.');
   if (/^application-debuggable/m.test(badging)) fail('Refusing a debuggable APK.');
 }

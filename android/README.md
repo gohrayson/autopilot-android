@@ -2,7 +2,9 @@
 
 Native Android client for Autopilot. Requires Android 8.0 or later; includes ARM64, ARMv7 and x86_64. The Windows application is independent.
 
-This is an Android test build. The first HyperOS 3 / Android 16 phone attempt confirmed installation and OneVPN sign-in/node refresh, then reported a native configuration rejection before tunnel startup. Version 0.1.1 adds native rejection diagnostics and isolates incompatible nodes. Build and parser verification are recorded in `ANDROID_CONFIG_FIX_RECEIPTS.md`; the first build's evidence remains in `ANDROID_RECEIPTS.md`. Actual phone VPN traffic still needs verification: this Windows host's official Android emulator crashes before its guest kernel starts. The emulator runtime probe refuses physical devices.
+Version 0.1.2 fixes the native configuration rejection reproduced after the first HyperOS 3 / Android 16 phone installation. Android's JSON serializer escaped forward slashes as `\/`; the embedded core reads the profile as YAML and rejected those escapes, including in the empty baseline before any provider node was loaded. The production writer now removes only optional slash escapes while preserving the values of passwords, paths and other strings.
+
+The actual Android native library now accepts the production empty baseline and reports the `AUTOPILOT` selector as `REJECT` on a hosted Android 15 / API 35 x86_64 emulator. [The hosted runtime receipt](ANDROID_HOSTED_RUNTIME_RECEIPTS.md) records the failure, fix, source commit, JUnit report and logcat. This verifies JNI configuration loading; phone VPN traffic, TUN routing and provider connections still need device verification. The release build evidence is in [ANDROID_012_RECEIPTS.md](ANDROID_012_RECEIPTS.md), earlier host parser evidence is in [ANDROID_CONFIG_FIX_RECEIPTS.md](ANDROID_CONFIG_FIX_RECEIPTS.md), and the first build's evidence remains in [ANDROID_RECEIPTS.md](ANDROID_RECEIPTS.md).
 
 ## Features
 
@@ -12,6 +14,7 @@ This is an Android test build. The first HyperOS 3 / Android 16 phone attempt co
 - Ordered, freely editable country preferences; automatic health, service, latency and stability selection; switch once or explicitly pin.
 - Per-app bypass, applied on the next VPN start.
 - Local diagnostics that exclude account passwords, sessions, configuration keys and response bodies.
+- In-app update checks, verified downloads and Android package installation for signed release builds.
 
 ## Build on Windows
 
@@ -27,15 +30,25 @@ The release signing key is created once in `.data/android-signing/`. Its passwor
 
 ## Install and use
 
-1. Copy the APK to the phone and open it. Allow the file manager to install this app if Android asks.
+1. On the phone, open the [latest release](https://github.com/gohrayson/autopilot-android/releases/latest), download its `Autopilot-Android-<version>.apk` asset and open it. Allow the browser or file manager to install this app if Android asks. No PC transfer is required.
 2. Open Autopilot and sign in to OneVPN, Octohide, or both. Alternatively use **More → Import configuration** for a local Clash JSON/YAML or WireGuard export.
 3. Choose **Edit priority order** to add and reorder preferred countries. An empty list chooses the fastest healthy node anywhere.
 4. Tap **Start VPN** and accept Android's VPN permission. Allow notifications so the disconnect control remains visible.
 5. A node tap switches once while leaving automation enabled. Hold a node to pin it; **Resume Auto** releases it.
 
-Install updates over the existing app to retain accounts and country priorities. Do not uninstall first. When startup fails, use **⋯ → Diagnostics → Copy**. Diagnostics identify the configuration stage, a fixed rejection category, and the affected protocol/index when supplied by the core; credentials and raw provider configurations are excluded.
+Install the signed release over the existing app to retain accounts and country priorities. The update must use the same signing certificate; do not uninstall first. When startup fails, use **⋯ → Diagnostics → Copy**. Diagnostics identify the configuration stage, a fixed rejection category, and the affected protocol/index when supplied by the core; credentials and raw provider configurations are excluded.
 
 For HyperOS background operation, open Autopilot's Android app settings and set battery usage to **No restrictions** if HyperOS stops the VPN when the screen is off. Availability and wording vary by HyperOS build. Android's system VPN settings also support Always-on VPN and blocking connections without VPN; those settings remain the device owner's choice.
+
+## App updates
+
+Version 0.1.2 includes an **Updates** panel on the main screen and in the **⋯** menu. It uses the free public GitHub release feed at [`latest.json`](https://github.com/gohrayson/autopilot-android/releases/latest/download/latest.json) by default; no update server setup or GitHub sign-in is needed. A custom public HTTPS feed can be configured through **Update server**.
+
+Automatic checks, Wi-Fi downloads and automatic installation are enabled by default. Checks run on app launch, every 15 minutes while the app is open, and about every six hours in the background; Android may delay background work. Automatic download requires the active network to be validated, unmetered Wi-Fi. If another VPN hides that transport, use **Download update** manually.
+
+Before installation, the app verifies the APK size and SHA-256, package identity, newer version, Android compatibility and the same signing certificate as the installed app. Open **Updates → Allow installation from Autopilot** once to grant Android's installation permission. On Android 12 / API 31 or later, automatic installation is attempted only while Autopilot's VPN is stopped and no connection is requested. Android or HyperOS may still ask for confirmation. On older Android versions, tap **Install update**. Installing restarts Autopilot; reopen it to reconnect. The app keeps accounts and preferences, and automatic installation does not stop a running VPN.
+
+These update rules describe the implemented source behavior. Installation through Android's package installer has not yet been verified on the phone. Preview/debug builds use a separate package and do not accept the release update feed.
 
 ## Integration boundaries
 

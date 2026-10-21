@@ -88,6 +88,16 @@ test('APK signer, package, version and SDK are pinned', () => {
   for (const bad of [badging.replace("versionCode='3'", "versionCode='2'"), badging.replace("name='app.autopilot.android'", "name='app.autopilot.android.debug'"), badging.replace("sdkVersion:'26'", "sdkVersion:'29'")]) assert.throws(() => publisher.verifyApkMetadata(signer, bad, VERSION), /does not match/);
   assert.throws(() => publisher.verifyApkMetadata(signer, badging + 'application-debuggable', VERSION), /debuggable/);
 });
+test('actual aapt2 35 minSdkVersion output is accepted alongside the legacy spelling', () => {
+  const signer = `Signer #1 certificate SHA-256 digest: ${publisher.CERTIFICATE}`;
+  // Captured from SDK build-tools/35.0.0/aapt2.exe dump badging on the signed APK.
+  const badging = "package: name='app.autopilot.android' versionCode='3' versionName='0.1.2' platformBuildVersionName='15' platformBuildVersionCode='35' compileSdkVersion='35' compileSdkVersionCodename='15'\nminSdkVersion:'26'\ntargetSdkVersion:'35'\nuses-permission: name='android.permission.INTERNET'\n";
+  publisher.verifyApkMetadata(signer, badging, VERSION);
+  publisher.verifyApkMetadata(signer, badging.replace(/\n/g, '\r\n'), VERSION);
+  publisher.verifyApkMetadata(signer, badging.replace('minSdkVersion:', 'sdkVersion:'), VERSION);
+  for (const extra of ["minSdkVersion:'26'\n", "minSdkVersion:'29'\n", "sdkVersion:'26'\n", "sdkVersion:'29'\n", "sdkVersion:'invalid'\n"]) assert.throws(() => publisher.verifyApkMetadata(signer, badging + extra, VERSION), /does not match/);
+  assert.throws(() => publisher.verifyApkMetadata(signer, badging.replace("minSdkVersion:'26'", "minSdkVersion:'29'"), VERSION), /does not match/);
+});
 test('dry-run preparation rejects a mislabeled old signed APK before touching publication', () => {
   const files = new Map([[path.join(ROOT, 'android/app/build.gradle'), GRADLE], [path.join(ROOT, 'dist/android/Autopilot-Android-0.1.2.apk'), Buffer.from('old APK')]]);
   const signer = `Signer #1 certificate SHA-256 digest: ${publisher.CERTIFICATE}`;
