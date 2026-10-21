@@ -13,6 +13,7 @@ import java.util.concurrent.*;
 
 public final class AutopilotApp extends Application {
     public ProviderRepository providers;
+    public UpdateManager updates;
     public volatile VpnEngine engine;
     public final ExecutorService providerExecutor = Executors.newSingleThreadExecutor();
     public volatile String providerBusy = "";
@@ -27,6 +28,8 @@ public final class AutopilotApp extends Application {
         super.onCreate(); prefs = getSharedPreferences("preferences", MODE_PRIVATE);
         try{String saved=prefs.getString("coreDiagnostic","");if(saved.length()<=8192&&!saved.isEmpty())lastCoreDiagnostic=CoreDiagnostics.restore(new JSONObject(saved));}catch(Exception ignored){}
         providers = new ProviderRepository(this);
+        updates = new UpdateManager(this);
+        updates.start();
         providers.onChanged = () -> {
             String fingerprint=String.join(",",providers.nodes().stream().map(n->n.id).collect(java.util.stream.Collectors.toList()));
             if(!fingerprint.equals(nodeFingerprint)){nodeFingerprint=fingerprint;VpnEngine e=engine;if(e!=null)e.nodesChanged();}
@@ -65,7 +68,14 @@ public final class AutopilotApp extends Application {
         lastCoreDiagnostic=safe;prefs.edit().putString("coreDiagnostic",safe.toString()).apply();
         log("core-"+stage.value,diagnostic.logCode());changed();
     }
-    public void changed(){main.post(()->{for(Runnable listener:listeners)listener.run();});}
+    public void recordBaselineDiagnostic(JSONObject diagnostic){
+        JSONObject safe=CoreDiagnostics.restore(diagnostic);
+        if(safe==null||!"baseline".equals(safe.optString("stage")))return;
+        try{safe.put("at",System.currentTimeMillis()).put("skippedCount",0);}catch(JSONException ignored){}
+        lastCoreDiagnostic=safe;prefs.edit().putString("coreDiagnostic",safe.toString()).apply();
+        log("core-baseline",safe.optString("code"));changed();
+    }
+    public void changed(){UpdateManager updater=updates;if(updater!=null)updater.connectionStateChanged();main.post(()->{for(Runnable listener:listeners)listener.run();});}
     public void listen(Runnable listener){listeners.addIfAbsent(listener);}
     public void unlisten(Runnable listener){listeners.remove(listener);}
     /** Callers pass fixed component/code identifiers, never exception text or configurations. */
@@ -82,6 +92,7 @@ public final class AutopilotApp extends Application {
         JSONObject s=state(); out.append("VPN: ").append(s.optString("phase","idle")).append("\n");
         out.append("VPN error: ").append(s.optString("error","")).append("\nBaseline accepted: ").append(s.optBoolean("coreBaselineAccepted")).append("\nSkipped nodes: ").append(s.optInt("skippedCount")).append("\n");
         JSONObject core=coreDiagnostic();if(core!=null)out.append("Last core diagnostic: ").append(core).append("\n");
+        if(updates!=null)out.append(updates.diagnostic());
         JSONArray skipped=s.optJSONArray("skippedNodes");if(skipped!=null&&skipped.length()>0)out.append("Skipped diagnostics: ").append(skipped).append("\n");
         for(String p:List.of("onevpn","octohide")){
             JSONObject a=providers.status(p);out.append(p).append(": ").append(a.optString("phase")).append(" / ").append(a.optString("code")).append(" / ").append(a.optInt("nodeCount")).append(" nodes\n");

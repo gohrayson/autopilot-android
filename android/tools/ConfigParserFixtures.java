@@ -40,7 +40,7 @@ public final class ConfigParserFixtures {
         Map<String, Integer> ports = new LinkedHashMap<>();
         JSONObject configuration = VpnEngine.configuration(nodes, ports);
         Path output = directory.resolve(id + ".json");
-        Files.writeString(output, configuration.toString(2), StandardCharsets.UTF_8);
+        Files.write(output, CoreConfigEncoding.encode(configuration));
         manifest.put(new JSONObject().put("id", id).put("file", output.toAbsolutePath().toString())
             .put("nodes", nodes.size()).put("expectedAccepted", expectedAccepted));
         System.out.println("EMIT " + id + " nodes=" + nodes.size() + " expected=" + (expectedAccepted ? "accept" : "reject"));

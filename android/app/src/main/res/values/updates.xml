@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="update_version_summary">Installed: %1$s\n%2$s</string>
+    <string name="update_checked_summary">%1$s\nLast checked: %2$s</string>
+    <string name="update_automatic_checks">Automatically check for updates</string>
+    <string name="update_wifi_downloads">Automatically download on unmetered Wi-Fi</string>
+    <string name="update_automatic_installs">Install automatically while VPN is stopped (Android 12+)</string>
+</resources>

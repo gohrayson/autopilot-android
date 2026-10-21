@@ -31,7 +31,7 @@ public final class NativeCoreConfigTest {
             assertEquals(0,config.getJSONArray("proxies").length());assertEquals(0,config.getJSONArray("listeners").length());
             assertEquals("[\"REJECT\"]",config.getJSONArray("proxy-groups").getJSONObject(0).getJSONArray("proxies").toString());
             assertEquals("[\"MATCH,AUTOPILOT\"]",config.getJSONArray("rules").toString());assertFalse(config.getJSONObject("tun").getBoolean("enable"));
-            byte[] bytes=config.toString().getBytes(StandardCharsets.UTF_8);
+            byte[] bytes=CoreConfigEncoding.encode(config);
             try(FileOutputStream stream=new FileOutputStream(profile)){stream.write(bytes);stream.getFD().sync();}
             assertTrue(profile.isFile());assertEquals(bytes.length,profile.length());assertArrayEquals(bytes,Files.readAllBytes(profile.toPath()));
             JSONObject init=new JSONObject().put("home-dir",home.getAbsolutePath()).put("version",Build.VERSION.SDK_INT);
@@ -39,7 +39,7 @@ public final class NativeCoreConfigTest {
             assertEquals(2,init.length());assertTrue(init.get("version") instanceof Integer);
             assertEquals("REJECT",setup.getJSONObject("selected-map").getString("AUTOPILOT"));
             StringBuilder digest=new StringBuilder();for(byte b:MessageDigest.getInstance("SHA-256").digest(bytes))digest.append(String.format(Locale.ROOT,"%02x",b&255));
-            String evidence="SDK="+Build.VERSION.SDK_INT+" ABI="+Build.SUPPORTED_ABIS[0]+" bytes="+bytes.length+" sha256="+digest+"\ninit="+init+"\nsetup="+setup+"\ncredential-free-baseline="+config;
+            String evidence="SDK="+Build.VERSION.SDK_INT+" ABI="+Build.SUPPORTED_ABIS[0]+" bytes="+bytes.length+" sha256="+digest+"\ninit="+init+"\nsetup="+setup+"\ncredential-free-baseline="+new String(bytes,StandardCharsets.UTF_8);
             System.out.println("AUTOPILOT_NATIVE_BASELINE_BEGIN "+evidence);
             Clash.INSTANCE.load(context.getApplicationInfo().nativeLibraryDir);Clash.INSTANCE.assertReady();loaded=true;
             CompletableFuture<String> completion=new CompletableFuture<>();

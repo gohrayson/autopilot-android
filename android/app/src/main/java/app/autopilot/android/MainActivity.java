@@ -25,12 +25,15 @@ public final class MainActivity extends Activity {
     private static final int BLUE=0xff315fea, INK=0xff15233c, MUTED=0xff64728b, GREEN=0xff16865d, RED=0xffb53636;
     private AutopilotApp app;
     private LinearLayout content, nodeList;
-    private TextView phase, selected, detail, countries, oneStatus, octoStatus, nodeSummary, error;
+    private TextView phase, selected, detail, countries, oneStatus, octoStatus, nodeSummary, error, updateSummary;
+    private AlertDialog updateDialog;
+    private TextView updateDialogStatus, updateDialogNotes;
+    private Button updateCheck, updateDownload, updateInstall;
     private Button connect, auto, retest;
     private final Runnable render = this::render;
     private boolean visible;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final Runnable tick = new Runnable(){public void run(){if(visible){render();handler.postDelayed(this,3000);}}};
+    private final Runnable tick = new Runnable(){public void run(){if(visible){render();app.updates.foregroundCheck();handler.postDelayed(this,3000);}}};
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state); app=(AutopilotApp)getApplication();
@@ -63,12 +66,19 @@ public final class MainActivity extends Activity {
         oneStatus=accountRow(accounts,"OneVPN","onevpn");octoStatus=accountRow(accounts,"Octohide","octohide");
         addText(accounts,"Sign in on this device. Sessions and imported configurations are encrypted with Android Keystore. Passwords are not saved.",12,MUTED); content.addView(accounts);
 
+        LinearLayout updates=card();section(updates,"App updates");updateSummary=addText(updates,"Autopilot "+BuildConfig.VERSION_NAME,13,MUTED);
+        Button openUpdates=button("Updates",false);openUpdates.setOnClickListener(v->updatesDialog());updates.addView(openUpdates,full());content.addView(updates);
+
         LinearLayout nodes=card();section(nodes,"Nodes");nodeSummary=addText(nodes,"No nodes yet",13,MUTED);nodeList=column();nodes.addView(nodeList);content.addView(nodes);
         addText(content,"Autopilot Android · "+BuildConfig.VERSION_NAME,12,MUTED);
         render();
+        handleUpdateIntent(getIntent());
     }
-    @Override protected void onResume(){super.onResume();visible=true;app.listen(render);render();handler.postDelayed(tick,3000);}
+    @Override protected void onResume(){super.onResume();visible=true;app.listen(render);render();app.updates.connectionStateChanged();app.updates.foregroundCheck();handler.postDelayed(tick,3000);}
     @Override protected void onPause(){visible=false;app.unlisten(render);handler.removeCallbacks(tick);super.onPause();}
+    @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);handleUpdateIntent(intent);}
+    @Override protected void onDestroy(){if(updateDialog!=null)updateDialog.dismiss();super.onDestroy();}
+    private void handleUpdateIntent(Intent intent){if(intent!=null&&intent.getBooleanExtra("openUpdates",false)){intent.removeExtra("openUpdates");handler.post(this::updatesDialog);}}
 
     private void render(){
         if(isFinishing())return;
@@ -83,6 +93,7 @@ public final class MainActivity extends Activity {
         auto.setEnabled(running); retest.setEnabled(running&&!s.optBoolean("busy"));
         List<String> pref=app.preferred();countries.setText(pref.isEmpty()?"Fastest healthy node anywhere":String.join("  →  ",pref.stream().map(MainActivity::countryName).collect(java.util.stream.Collectors.toList())));
         renderAccount("onevpn",oneStatus);renderAccount("octohide",octoStatus);
+        renderUpdates();
         JSONArray list=app.engine==null&&!p.equals("error")?null:s.optJSONArray("nodes");if(list==null){list=new JSONArray();for(Node n:app.providers.nodes()){JSONObject o=new JSONObject();try{o.put("name",n.name).put("country",n.country).put("provider",n.provider).put("status","Not tested");}catch(JSONException ignored){}list.put(o);}}
         int skippedCount=s.optInt("skippedCount");
         nodeSummary.setText(getResources().getQuantityString(R.plurals.node_summary,list.length(),list.length())+(skippedCount>0?" · "+skippedCount+" incompatible nodes skipped":""));
@@ -175,10 +186,66 @@ public final class MainActivity extends Activity {
         Button add=button("Add country",false);add.setOnClickListener(v->{List<String> codes=new ArrayList<>(Arrays.asList(Locale.getISOCountries()));codes.removeAll(app.preferred());codes.removeAll(List.of("CN","HK","MO"));codes.sort(Comparator.comparing(MainActivity::countryName));String[] names=codes.stream().map(MainActivity::countryName).toArray(String[]::new);new AlertDialog.Builder(this).setTitle("Choose a country").setItems(names,(d,w)->{List<String> p=app.preferred();if(p.size()>=32){toast("Choose up to 32 countries");return;}p.add(codes.get(w));app.setPreferred(p);draw[0].run();}).show();});outer.addView(add);
         ScrollView scroll=new ScrollView(this);scroll.addView(outer);new AlertDialog.Builder(this).setTitle("Country priority").setView(scroll).setPositiveButton("Done",null).show();
     }
-    private void menu(View anchor){PopupMenu menu=new PopupMenu(this,anchor);String[] options={"Import configuration","Bypass apps","Diagnostics","Android app settings","About & licenses"};for(String option:options)menu.getMenu().add(option);
+    private void menu(View anchor){PopupMenu menu=new PopupMenu(this,anchor);String[] options={"Updates","Import configuration","Bypass apps","Diagnostics","Android app settings","About & licenses"};for(String option:options)menu.getMenu().add(option);
         menu.setOnMenuItemClickListener(item->{switch(item.getTitle().toString()){
             case "Import configuration"->startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),103);
-            case "Bypass apps"->bypassDialog();case "Diagnostics"->diagnostics();case "Android app settings"->startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));case "About & licenses"->about();default->{} }return true;});menu.show();}
+            case "Updates"->updatesDialog();case "Bypass apps"->bypassDialog();case "Diagnostics"->diagnostics();case "Android app settings"->startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));case "About & licenses"->about();default->{} }return true;});menu.show();}
+    private String updateStatus(JSONObject state){
+        String phase=state.optString("phase"),version=state.optString("versionName");
+        String status=switch(phase){case "checking"->"Checking for updates…";case "downloading"->"Downloading and verifying "+version+"…";case "installing"->"Android is installing version "+version;case "confirmation"->"Android needs your confirmation to install "+version;case "ready"->"Version "+version+" is ready to install";case "available"->"Version "+version+" is available";case "current"->"You have the latest version";case "error"->"Update needs attention";default->"Automatic update checks are ready";};
+        if(state.optBoolean("ready")&&phase.equals("ready")&&app.updates.automaticInstalls())status+=!state.optBoolean("installPermission")?"\nAllow updates from Autopilot to enable installation.":state.optBoolean("vpnDefersInstall")?"\nAutomatic installation waits until the VPN is stopped.":Build.VERSION.SDK_INT<31?"\nTap Install update to continue.":"\nAutomatic installation is enabled.";
+        String failure=UpdateManager.message(state.optString("error"));
+        return status+(failure.isEmpty()?"":"\n"+failure);
+    }
+    private void renderUpdates(){
+        JSONObject state=app.updates.state();
+        String summary=getString(R.string.update_version_summary,BuildConfig.VERSION_NAME,updateStatus(state));
+        updateSummary.setText(summary);
+        if(updateDialog==null||!updateDialog.isShowing())return;
+        long checked=state.optLong("lastChecked");
+        String checkedText=checked==0?"Never":DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.MEDIUM).format(new Date(checked));
+        updateDialogStatus.setText(getString(R.string.update_checked_summary,summary,checkedText));
+        String notes=state.optString("notes");updateDialogNotes.setText(notes);updateDialogNotes.setVisibility(notes.isEmpty()?View.GONE:View.VISIBLE);
+        boolean busy=state.optBoolean("busy");updateCheck.setEnabled(!busy);updateDownload.setEnabled(!busy&&state.optBoolean("available")&&!state.optBoolean("ready"));updateInstall.setEnabled(!busy&&state.optBoolean("ready"));
+    }
+    private void updatesDialog(){
+        if(isFinishing()||isDestroyed()||(updateDialog!=null&&updateDialog.isShowing()))return;
+        LinearLayout body=column();body.setPadding(dp(20),dp(8),dp(20),dp(12));
+        updateDialogStatus=addText(body,"",14,INK);updateDialogNotes=addText(body,"",13,MUTED);updateDialogNotes.setTextIsSelectable(true);
+        updateCheck=button("Check now",false);updateCheck.setOnClickListener(v->app.updates.checkNow());body.addView(updateCheck,full());
+        updateDownload=button("Download update",false);updateDownload.setOnClickListener(v->app.updates.downloadNow());body.addView(updateDownload,full());
+        updateInstall=button("Install update",true);updateInstall.setOnClickListener(v->installUpdate());body.addView(updateInstall,full());
+        addText(body,"Installing restarts Autopilot. Reopen it to reconnect. Your accounts and preferences are kept.",12,MUTED);
+        CheckBox automatic=new CheckBox(this);automatic.setText(R.string.update_automatic_checks);automatic.setChecked(app.updates.automaticChecks());body.addView(automatic);
+        CheckBox wifi=new CheckBox(this);wifi.setText(R.string.update_wifi_downloads);wifi.setChecked(app.updates.wifiDownloads());body.addView(wifi);
+        CheckBox install=new CheckBox(this);install.setText(R.string.update_automatic_installs);install.setChecked(app.updates.automaticInstalls());install.setEnabled(Build.VERSION.SDK_INT>=31);body.addView(install);
+        automatic.setOnCheckedChangeListener((b,on)->app.updates.preferences(on,wifi.isChecked(),install.isChecked()));wifi.setOnCheckedChangeListener((b,on)->app.updates.preferences(automatic.isChecked(),on,install.isChecked()));install.setOnCheckedChangeListener((b,on)->app.updates.preferences(automatic.isChecked(),wifi.isChecked(),on));
+        Button permission=button("Allow installation from Autopilot",false);permission.setVisibility(getPackageManager().canRequestPackageInstalls()?View.GONE:View.VISIBLE);permission.setOnClickListener(v->installPermission());body.addView(permission,full());
+        addText(body,"Checks on app launch, every 15 minutes while open, and about every 6 hours in the background. Android may delay background checks or require installation confirmation. Automatic installation never stops a running VPN.",12,MUTED);
+        Button server=button("Update server",false);server.setOnClickListener(v->updateServerDialog());body.addView(server,full());
+        ScrollView scroll=new ScrollView(this);scroll.addView(body);
+        updateDialog=new AlertDialog.Builder(this).setTitle("App updates").setView(scroll).setPositiveButton("Close",null).create();
+        updateDialog.setOnDismissListener(d->{updateDialog=null;updateDialogStatus=null;updateDialogNotes=null;updateCheck=null;updateDownload=null;updateInstall=null;});updateDialog.show();renderUpdates();
+        if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED&&!getPreferences(MODE_PRIVATE).getBoolean("updateNotificationAsked",false)){
+            getPreferences(MODE_PRIVATE).edit().putBoolean("updateNotificationAsked",true).apply();requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},104);
+        }
+    }
+    private void updateServerDialog(){
+        EditText url=new EditText(this);url.setText(app.updates.feedUrl());url.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI);url.setSingleLine(false);url.setSelectAllOnFocus(true);
+        AlertDialog server=new AlertDialog.Builder(this).setTitle("Public HTTPS update feed").setMessage("The default GitHub server is ready to use. Only change this for your own release feed.").setView(url).setPositiveButton("Save",null).setNeutralButton("Use default",(d,w)->{try{app.updates.setFeedUrl(UpdateManager.DEFAULT_FEED);}catch(UpdateDownload.UpdateException error){toast(UpdateManager.message(error.code));}}).setNegativeButton("Cancel",null).create();
+        server.setOnShowListener(d->server.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{try{app.updates.setFeedUrl(url.getText().toString());server.dismiss();app.updates.checkNow();}catch(UpdateDownload.UpdateException error){toast(UpdateManager.message(error.code));}}));server.show();
+    }
+    private void installUpdate(){
+        if(!getPackageManager().canRequestPackageInstalls()){
+            installPermission();
+            return;
+        }
+        app.updates.prepareInstall(intent->{if(isFinishing()||isDestroyed()||!visible)return;try{startActivity(intent);}catch(ActivityNotFoundException unavailable){toast("Android’s package installer could not open. Try again from Updates.");}});
+    }
+    private void installPermission(){
+        toast("Allow Autopilot to install updates, then return to Updates. Android may still ask you to confirm installation.");
+        try{startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+getPackageName())));}catch(ActivityNotFoundException unavailable){toast("Open Android app settings and allow installs from Autopilot.");}
+    }
     private void bypassDialog(){
         List<ResolveInfo> found=getPackageManager().queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),0);
         TreeMap<String,String> apps=new TreeMap<>();for(ResolveInfo info:found)if(!info.activityInfo.packageName.equals(getPackageName()))apps.put(info.loadLabel(getPackageManager())+"\n"+info.activityInfo.packageName,info.activityInfo.packageName);

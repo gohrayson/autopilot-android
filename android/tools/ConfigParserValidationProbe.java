@@ -47,7 +47,7 @@ public final class ConfigParserValidationProbe {
                 Files.createDirectories(attempt);
                 Path file = attempt.resolve("configuration.json");
                 JSONObject exact = VpnEngine.configuration(candidates, new LinkedHashMap<>());
-                Files.writeString(file, exact.toString(2), StandardCharsets.UTF_8);
+                Files.write(file, CoreConfigEncoding.encode(exact));
                 Process parser = new ProcessBuilder(nativeBinary.toString(), "-t", "-d", attempt.toString(), "-f", file.toString())
                     .redirectErrorStream(true).start();
                 CompletableFuture<String> output = CompletableFuture.supplyAsync(() -> {

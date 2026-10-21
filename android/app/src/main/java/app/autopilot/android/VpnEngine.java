@@ -47,11 +47,13 @@ public final class VpnEngine {
         Clash.INSTANCE.load(app.getApplicationInfo().nativeLibraryDir);Clash.INSTANCE.assertReady();nativeReady=true;
         // Establish that this platform can accept our global configuration independently
         // of provider nodes. No Android interface exists while these semantic gates run.
-        nodes=List.of();syncHealth();writeConfig();
-        String baseline=quickSetup("REJECT");
+        nodes=List.of();syncHealth();JSONObject baselineProfile=writeConfig();
+        JSONObject baselineInit=initParameters(),baselineSetup=selected("REJECT");
+        String baseline=quickSetup(baselineInit,baselineSetup);
         if(!"".equals(baseline)){
             CoreDiagnostics.Diagnostic diagnostic=CoreDiagnostics.classify(baseline,List.of());
-            app.recordCoreDiagnostic(diagnostic,CoreDiagnostics.Stage.BASELINE,0);throw new IOException(diagnostic.code);
+            app.recordBaselineDiagnostic(CoreDiagnostics.baselineDiagnostic(baseline,home.getAbsolutePath(),baselineProfile,baselineInit,baselineSetup));
+            throw new IOException(diagnostic.code);
         }
         baselineAccepted=true;app.log("core","CORE_BASELINE_ACCEPTED");
         ProfileValidation.Result profile=validateProfile(validatedNodes(),"",CoreDiagnostics.Stage.PROFILE);
@@ -299,9 +301,12 @@ public final class VpnEngine {
         if(!failed.isEmpty())app.requestRecovery(failed);
     }
     private String quickSetup(String name)throws Exception{
+        return quickSetup(initParameters(),selected(name));
+    }
+    private JSONObject initParameters()throws JSONException{return new JSONObject().put("home-dir",home.getAbsolutePath()).put("version",Build.VERSION.SDK_INT);}
+    private String quickSetup(JSONObject init,JSONObject setupParams)throws Exception{
         CompletableFuture<String> setup=new CompletableFuture<>();
-        JSONObject init=new JSONObject().put("home-dir",home.getAbsolutePath()).put("version",Build.VERSION.SDK_INT);
-        Clash.INSTANCE.quickSetup(init.toString(),selected(name).toString(),(InvokeInterface)setup::complete);
+        Clash.INSTANCE.quickSetup(init.toString(),setupParams.toString(),(InvokeInterface)setup::complete);
         return await(setup,20_000);
     }
     private void establish(boolean reuse)throws Exception{
@@ -344,11 +349,12 @@ public final class VpnEngine {
             .put("proxy-groups",new JSONArray().put(new JSONObject().put("name","AUTOPILOT").put("type","select").put("proxies",names)))
             .put("listeners",listeners).put("rules",new JSONArray().put("MATCH,AUTOPILOT"));
     }
-    private void writeConfig()throws Exception{
+    private JSONObject writeConfig()throws Exception{
         JSONObject config=configuration(nodes,ports);
         File staging=new File(home,"config.yaml.tmp"),target=new File(home,"config.yaml");
-        try(FileOutputStream out=new FileOutputStream(staging)){out.write(config.toString().getBytes(StandardCharsets.UTF_8));out.getFD().sync();}
+        try(FileOutputStream out=new FileOutputStream(staging)){out.write(CoreConfigEncoding.encode(config));out.getFD().sync();}
         Files.move(staging.toPath(),target.toPath(),StandardCopyOption.REPLACE_EXISTING,StandardCopyOption.ATOMIC_MOVE);
+        return config;
     }
     private CompletableFuture<JSONObject> actionAsync(String method,Object data)throws JSONException{
         CompletableFuture<JSONObject> result=new CompletableFuture<>();

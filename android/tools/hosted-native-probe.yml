@@ -1,0 +1,102 @@
+name: Android native core probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hosted-native-probe.yml'
+      - 'app/**'
+      - 'android/**'
+      - 'tools/ci-native-check.sh'
+      - '*.gradle'
+      - 'gradle.properties'
+
+permissions:
+  contents: read
+
+jobs:
+  native-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-native-results
+          if [[ -f settings.gradle ]]; then
+            project="$GITHUB_WORKSPACE"
+          elif [[ -f android/settings.gradle ]]; then
+            project="$GITHUB_WORKSPACE/android"
+          else
+            echo 'Android settings.gradle missing' >&2
+            exit 1
+          fi
+          echo "AUTOPILOT_ANDROID_DIR=$project" >> "$GITHUB_ENV"
+          printf 'runner=%s\nproject=%s\n' "$RUNNER_OS" "$project" > ci-native-results/runner.txt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '12266719'
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Verify pinned native core and build synthetic instrumentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          aar="$AUTOPILOT_ANDROID_DIR/app/libs/libmihomo-android-v0.3.11.aar"
+          mkdir -p "$(dirname "$aar")"
+          if [[ ! -f "$aar" ]]; then
+            curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+              'https://github.com/oviron/libmihomo-android/releases/download/v0.3.11/libmihomo-android-v0.3.11.aar' \
+              --output "$aar"
+          fi
+          printf '%s  %s\n' '01bc41748840c8200bbaf08c044ba8704e35303a3179b75a3cce8517c8944251' "$aar" | sha256sum --check | tee ci-native-results/native-aar-sha256.txt
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0' > ci-native-results/sdk-install.log 2>&1
+          gradle -p "$AUTOPILOT_ANDROID_DIR" --no-daemon --console=plain \
+            :app:assembleDebug :app:assembleDebugAndroidTest 2>&1 | tee ci-native-results/build.log
+      - name: Enable KVM on disposable hosted runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm && test -w /dev/kvm
+          ls -l /dev/kvm | tee ci-native-results/kvm.txt
+      - name: Run only native configuration instrumentation
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: default
+          arch: x86_64
+          profile: pixel_5
+          cores: 2
+          ram-size: 2048M
+          emulator-boot-timeout: 600
+          disable-linux-hw-accel: false
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -accel on
+          script: bash "$AUTOPILOT_ANDROID_DIR/tools/ci-native-check.sh" "$AUTOPILOT_ANDROID_DIR"
+      - name: Preserve native errors, JUnit reports and logcat
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-core-api35-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ci-native-results/**
+            **/app/build/outputs/androidTest-results/**
+            **/app/build/reports/androidTests/**
+            **/app/build/outputs/connected_android_test_additional_output/**

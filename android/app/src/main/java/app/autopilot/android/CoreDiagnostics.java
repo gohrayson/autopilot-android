@@ -12,6 +12,7 @@ import java.util.regex.*;
  */
 public final class CoreDiagnostics {
     private static final int TEXT_LIMIT=16384,MAX_PROXIES=2000;
+    public static final int BASELINE_MESSAGE_LIMIT=2048;
     private static final Pattern PROXY_INDEX=Pattern.compile("^proxy ([0-9]{1,4}):",Pattern.CASE_INSENSITIVE);
     public enum Stage {
         BASELINE("baseline"),PROFILE("profile"),RECOVERY("recovery");
@@ -70,6 +71,26 @@ public final class CoreDiagnostics {
     private CoreDiagnostics(){}
     public static String messageForCode(String code){for(Kind kind:Kind.values())if(kind.code.equals(code))return kind.message;return null;}
     public static Diagnostic forKind(Kind kind){return result(Objects.requireNonNull(kind),-1,null);}
+    /**
+     * The fixed empty baseline contains no provider data. Only that exact profile,
+     * its real init directory and a REJECT-only selected-map may retain native text.
+     * Provider and recovery profiles continue through the fixed-code path.
+     */
+    public static JSONObject baselineDiagnostic(String rejection,String homeDir,JSONObject profile,JSONObject init,JSONObject setup){
+        JSONObject diagnostic=classify(rejection,List.of()).json();
+        try{
+            diagnostic.put("stage",Stage.BASELINE.value);
+            JSONObject expected=VpnEngine.configuration(List.of(),new HashMap<>());
+            JSONObject selected=new JSONObject().put("selected-map",new JSONObject().put("AUTOPILOT","REJECT"));
+            Object version=init==null?null:init.opt("version");
+            boolean safe=homeDir!=null&&!homeDir.isEmpty()&&homeDir.length()<=4096&&init!=null&&init.length()==2&&
+                homeDir.equals(init.opt("home-dir"))&&version instanceof Number&&((Number)version).doubleValue()==((Number)version).intValue()&&
+                ((Number)version).intValue()>=26&&((Number)version).intValue()<=99&&profile!=null&&setup!=null&&
+                canonical(profile).equals(canonical(expected))&&canonical(setup).equals(canonical(selected));
+            if(safe&&rejection!=null){String message=baselineText(rejection,homeDir);if(!message.isEmpty())diagnostic.put("nativeMessage",message);}
+        }catch(Exception ignored){}
+        return diagnostic;
+    }
     /** Reconstruct persisted diagnostics from the catalog; arbitrary stored fields/text are discarded. */
     public static JSONObject restore(JSONObject raw){
         if(raw==null)return null;Kind selected=null;
@@ -81,10 +102,33 @@ public final class CoreDiagnostics {
         JSONObject result=new Diagnostic(selected,index,type).json();
         try{
             for(Stage stage:Stage.values())if(stage.value.equals(raw.optString("stage")))result.put("stage",stage.value);
+            // This field is never accepted for a provider/recovery diagnostic.
+            if(Stage.BASELINE.value.equals(raw.optString("stage"))&&raw.opt("nativeMessage") instanceof String){
+                String message=baselineText((String)raw.opt("nativeMessage"),null);if(!message.isEmpty())result.put("nativeMessage",message);
+            }
             value=raw.opt("at");if(value instanceof Number&&((Number)value).longValue()>0&&((Number)value).longValue()<=4102444800000L)result.put("at",((Number)value).longValue());
             value=raw.opt("skippedCount");if(value instanceof Number&&((Number)value).doubleValue()==((Number)value).intValue()&&((Number)value).intValue()>=0&&((Number)value).intValue()<=ProfileValidation.MAX_DROPS)result.put("skippedCount",((Number)value).intValue());
         }catch(Exception ignored){}
         return result;
+    }
+    private static String baselineText(String input,String homeDir){
+        String text=input.substring(0,Math.min(TEXT_LIMIT,input.length()));
+        if(homeDir!=null&&!homeDir.isEmpty())text=text.replace(homeDir,"<core-home>");
+        // A restored record no longer has its original directory context.
+        text=text.replaceAll("/(?:data/(?:user(?:_de)?/[0-9]+|data)|mnt/expand/[^/]+/user/[0-9]+)/[^\\s\\\"']+","<app-private-path>");
+        StringBuilder safe=new StringBuilder();
+        for(int i=0;i<text.length()&&safe.length()<BASELINE_MESSAGE_LIMIT;i++){
+            char c=text.charAt(i);
+            if(Character.isISOControl(c)||Character.getType(c)==Character.FORMAT){if(safe.length()>0&&safe.charAt(safe.length()-1)!=' ')safe.append(' ');}
+            else safe.append(c);
+        }
+        return safe.toString().trim();
+    }
+    private static String canonical(Object value)throws Exception{
+        if(value instanceof JSONObject){JSONObject object=(JSONObject)value;ArrayList<String> keys=new ArrayList<>();object.keys().forEachRemaining(keys::add);Collections.sort(keys);
+            StringJoiner json=new StringJoiner(",","{","}");for(String key:keys)json.add(JSONObject.quote(key)+":"+canonical(object.get(key)));return json.toString();}
+        if(value instanceof org.json.JSONArray){org.json.JSONArray array=(org.json.JSONArray)value;StringJoiner json=new StringJoiner(",","[","]");for(int i=0;i<array.length();i++)json.add(canonical(array.get(i)));return json.toString();}
+        return value instanceof String?JSONObject.quote((String)value):String.valueOf(value);
     }
     public static Diagnostic classify(String rejection){return classify(rejection,null);}
     /**
