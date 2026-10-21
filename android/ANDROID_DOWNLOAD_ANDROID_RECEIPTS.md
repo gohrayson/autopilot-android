@@ -147,3 +147,92 @@ Pending. Append the exact source commit, CI run/artifact URL, actual JUnit tail
 and device properties after the hosted run. Expected observable markers are
 `AUTOPILOT_ANDROID_MULTIPART_ACCEPTED` and `AUTOPILOT_ANDROID_RESUME_ACCEPTED`.
 These names are expectations, not observed Android output in this receipt yet.
+
+## Completed hosted execution — 2026-10-21
+
+This completed run supersedes the initial pending preparation status above.
+The actual Android downloader accepted the complete concurrent download and the
+interrupted-prefix resume through a fresh downloader instance. The native
+baseline probe also passed in the same invocation.
+
+- Run: [39613950384](https://github.com/gohrayson/autopilot-android/actions/runs/39613950384), completed successfully.
+- Source commit: [`52e3853e285f4a02a2c77d7fdc601e82dcb273b8`](https://github.com/gohrayson/autopilot-android/commit/52e3853e285f4a02a2c77d7fdc601e82dcb273b8).
+- Job: [119269838856](https://github.com/gohrayson/autopilot-android/actions/runs/39613950384/job/119269838856).
+- Artifact: [native-core-api35-39613950384-1](https://github.com/gohrayson/autopilot-android/actions/runs/39613950384/artifacts/12351618456), 122,157 bytes.
+- Artifact SHA-256: `bc98964a5c4e2482f77b577d26a7c356654988ac2b410644687c7f0b917a8fc0`.
+
+The GitHub connector supplied the job log, artifact metadata and artifact ZIP.
+The ZIP was read in memory and its SHA-256 matched GitHub's artifact digest.
+Its actual JUnit XML, device-property files, Gradle output and logcat were
+inspected. The hosted artifact expires on 2026-10-28; decisive excerpts follow.
+
+Exact selected-method runner command, issued by
+`bash "$AUTOPILOT_ANDROID_DIR/tools/ci-native-check.sh" "$AUTOPILOT_ANDROID_DIR"`:
+
+```sh
+gradle -p "$AUTOPILOT_ANDROID_DIR" --no-daemon --console=plain \
+  :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest,app.autopilot.android.UpdateDownloadRuntimeTest
+```
+
+Verbatim runner output from `ci-native-results/native-core-gradle.log`:
+
+```text
+> Task :app:connectedDebugAndroidTest
+Starting 3 tests on emulator-5554 - 15
+
+Finished 3 tests on emulator-5554 - 15
+```
+
+Final runner result and independent selected-method XML verifier, verbatim:
+
+```text
+BUILD SUCCESSFUL in 28s
+64 actionable tasks: 1 executed, 63 up-to-date
+ANDROID_RUNTIME_XML_RECEIPT tests=3 expected=3 failures=0 errors=0 skipped=0 missing=0 duplicates=0 unexpected=0
+```
+
+Actual `TEST-emulator-5554 - 15-_app-.xml`:
+
+```xml
+<?xml version='1.0' encoding='UTF-8' ?>
+<testsuite name="app.autopilot.android.NativeCoreConfigTest" tests="3" failures="0" errors="0" skipped="0" time="1.871" timestamp="2026-10-21T14:11:45" hostname="localhost">
+  <properties>
+    <property name="device" value="emulator-5554 - 15" />
+    <property name="flavor" value="" />
+    <property name="project" value=":app" />
+  </properties>
+  <testcase name="emptyProductionBaselineIsAcceptedByActualAndroidCore" classname="app.autopilot.android.NativeCoreConfigTest" time="0.086" />
+  <testcase name="concurrentRangesPublishOnlyCompleteVerifiedBytes" classname="app.autopilot.android.UpdateDownloadRuntimeTest" time="0.516" />
+  <testcase name="interruptedPrefixesResumeAcrossDownloaderInstances" classname="app.autopilot.android.UpdateDownloadRuntimeTest" time="0.384" />
+</testsuite>
+```
+
+Device-property files and helper exit status, verbatim values:
+
+```text
+device-api.txt: 35
+device-abi.txt: x86_64
+device-pagesize.txt: 4096
+exit-status.txt: instrumentation_exit=0
+```
+
+Decisive `ci-native-results/logcat.txt` lines, verbatim:
+
+```text
+10-21 14:11:43.837  2328  2348 I System.out: AUTOPILOT_NATIVE_BASELINE_ACCEPTED selector=REJECT SDK=35 ABI=x86_64
+10-21 14:11:44.389  2328  2355 I System.out: AUTOPILOT_ANDROID_MULTIPART_ACCEPTED bytes=6291456 concurrent=4 sha256=cbe5f087d3a142f2cdcaf082ee1a4a00961dbd928cd49ef508600c173177f553 SDK=35
+10-21 14:11:44.766  2328  2362 I System.out: AUTOPILOT_ANDROID_RESUME_ACCEPTED cached=262144 network=6029312 total=6291456 SDK=35
+```
+
+The resumed transfer reused 262,144 persisted bytes and fetched only the
+remaining 6,029,312 bytes, producing the exact 6,291,456-byte fixture. Passing
+assertions also established no premature verified APK, restored initial cached
+progress, correct missing suffixes, complete output bytes and SHA-256.
+
+Verified scope: the production downloader on an actual API 35 x86_64 Android
+emulator, using Android JSON, private filesystem, threads, interruption, persisted
+resume and merge/hash validation through an injected transport. This run does
+not establish physical-phone behavior, ARM64/16 KB execution, internet download
+speed, actual server range support, provider/VPN/TUN traffic, installer behavior
+or UI interaction.

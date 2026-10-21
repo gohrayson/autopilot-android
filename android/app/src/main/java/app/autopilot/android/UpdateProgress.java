@@ -2,7 +2,7 @@ package app.autopilot.android;
 
 /** Thread-safe attempt metrics. Restored bytes are progress, never network throughput. */
 public final class UpdateProgress {
-    public static final int MAX_CONNECTIONS = 4;
+    public static final int MAX_CONNECTIONS = UpdateDownload.PARALLEL_CONNECTIONS;
     public final long totalBytes;
     private long restoredBytes, startedNanos;
     private long downloadedBytes;
