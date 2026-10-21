@@ -15,6 +15,7 @@ The actual Android native library now accepts the production empty baseline and 
 - Per-app bypass, applied on the next VPN start.
 - Local diagnostics that exclude account passwords, sessions, configuration keys and response bodies.
 - In-app update checks, verified downloads and Android package installation for signed release builds.
+- Version 0.1.3 adds parallel update downloads, saved transfer progress, pause/resume controls and live speed/progress.
 
 ## Build on Windows
 
@@ -45,6 +46,10 @@ For HyperOS background operation, open Autopilot's Android app settings and set 
 Version 0.1.2 includes an **Updates** panel on the main screen and in the **⋯** menu. It uses the free public GitHub release feed at [`latest.json`](https://github.com/gohrayson/autopilot-android/releases/latest/download/latest.json) by default; no update server setup or GitHub sign-in is needed. A custom public HTTPS feed can be configured through **Update server**.
 
 Automatic checks, Wi-Fi downloads and automatic installation are enabled by default. Checks run on app launch, every 15 minutes while the app is open, and about every six hours in the background; Android may delay background work. Automatic download requires the active network to be validated, unmetered Wi-Fi. If another VPN hides that transport, use **Download update** manually.
+
+From version 0.1.3, APKs of at least 4 MiB use up to four parallel range connections when the server supports them. **Updates** shows the downloaded amount, speed, remaining time and active connections. **Pause download** keeps saved parts and stays paused across app restarts and automatic checks; **Resume download** continues missing ranges. Transient failures receive bounded retries. Servers without range support use a single connection, and changing range support safely restarts that transfer. Connection parallelism can improve a limited single connection; total network or server limits still apply.
+
+An older installed version uses its existing download engine to obtain 0.1.3. The accelerated engine becomes available after that update is installed. Existing installations can receive the release through **Updates → Check now** without transferring an APK from a PC.
 
 Before installation, the app verifies the APK size and SHA-256, package identity, newer version, Android compatibility and the same signing certificate as the installed app. Open **Updates → Allow installation from Autopilot** once to grant Android's installation permission. On Android 12 / API 31 or later, automatic installation is attempted only while Autopilot's VPN is stopped and no connection is requested. Android or HyperOS may still ask for confirmation. On older Android versions, tap **Install update**. Installing restarts Autopilot; reopen it to reconnect. The app keeps accounts and preferences, and automatic installation does not stop a running VPN.
 

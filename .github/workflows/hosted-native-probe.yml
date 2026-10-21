@@ -1,4 +1,4 @@
-name: Android native core probe
+name: Android native and download runtime probes
 
 on:
   workflow_dispatch:
@@ -74,7 +74,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           test -r /dev/kvm && test -w /dev/kvm
           ls -l /dev/kvm | tee ci-native-results/kvm.txt
-      - name: Run only native configuration instrumentation
+      - name: Run native baseline and multipart download instrumentation
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35

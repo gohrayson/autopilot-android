@@ -34,11 +34,22 @@ public final class UpdateManager {
     private volatile String phase = "idle", error = "";
     private volatile Intent confirmation;
     private volatile java.util.function.Consumer<Intent> installCallback;
+    private volatile UpdateManifest downloadingRelease;
+    private volatile TransferProgress progress;
+    private volatile String pausedReleaseHash;
+    private volatile boolean userPauseRequested;
+    private final Object progressNotifications = new Object();
+    private long lastProgressNotificationNanos, lastPublishedDownloaded;
+    private static final class TransferProgress{
+        final UpdateManifest release;final UpdateProgress metrics;
+        TransferProgress(UpdateManifest release,UpdateProgress metrics){this.release=release;this.metrics=metrics;}
+    }
 
     public UpdateManager(AutopilotApp app) {
         this.app = app;
         prefs = app.getSharedPreferences("updates", Context.MODE_PRIVATE);
         directory = new File(app.getNoBackupFilesDir(), "updates");
+        pausedReleaseHash=prefs.getString("pausedReleaseHash","");
     }
     public void start() {
         schedule();
@@ -56,26 +67,43 @@ public final class UpdateManager {
         String validated = UpdateManifest.publicHttpsUri(url.trim()).toASCIIString();
         if (busy.get()) throw new UpdateDownload.UpdateException("UPDATE_BUSY");
         if(validated.equals(feedUrl()))return;
+        UpdateManifest previous=available;
+        if(previous!=null)downloader.discardResume(previous,directory);
         abandonSession();
-        prefs.edit().putString("feedUrl", validated).remove("manifest").remove("manifestFeed").putLong("lastChecked", 0).apply();
-        available = null; ready = null; phase = "idle"; error = "";
+        prefs.edit().putString("feedUrl", validated).remove("manifest").remove("manifestFeed").remove("pausedReleaseHash").putLong("lastChecked", 0).apply();
+        available = null; ready = null; progress=null;pausedReleaseHash="";phase = "idle"; error = "";
         app.changed();
     }
     public JSONObject state() {
-        JSONObject state = new JSONObject(); UpdateManifest release = available;
+        JSONObject state = new JSONObject(); UpdateManifest release = available;String currentPhase=phase;
         try {
-            state.put("phase", phase).put("error", error).put("busy", busy.get())
+            state.put("phase", currentPhase).put("error", error).put("busy", busy.get())
                     .put("lastChecked", prefs.getLong("lastChecked", 0)).put("ready", ready != null)
                     .put("available", release != null).put("versionName", release == null ? "" : release.versionName)
                     .put("notes", release == null ? "" : release.notes)
                     .put("sizeBytes", release == null ? 0 : release.sizeBytes)
                     .put("installPermission",app.getPackageManager().canRequestPackageInstalls())
-                    .put("vpnDefersInstall",!vpnStopped());
+                    .put("vpnDefersInstall",!vpnStopped())
+                    .put("downloadPaused",isUserPaused(release))
+                    .put("downloadPausing",userPauseRequested&&downloadingRelease!=null&&"downloading".equals(currentPhase))
+                    .put("canPause",busy.get()&&"downloading".equals(currentPhase)&&!userPauseRequested);
+            TransferProgress current=progress;
+            UpdateProgress.Snapshot bytes=current==null||release==null||!sameRelease(current.release,release)?null:current.metrics.snapshot(System.nanoTime(),"downloading".equals(currentPhase));
+            long downloaded=bytes==null?0:bytes.downloadedBytes,total=bytes==null?0:bytes.totalBytes;
+            state.put("downloadedBytes",downloaded).put("downloadTotalBytes",total)
+                    .put("downloadPercent",bytes==null?0:bytes.percent)
+                    .put("downloadBytesPerSecond",bytes==null?0:bytes.bytesPerSecond)
+                    .put("downloadEtaSeconds",bytes==null?-1:bytes.etaSeconds)
+                    .put("downloadConnections",bytes==null?0:bytes.activeConnections)
+                    .put("canResume",release!=null&&ready==null&&!busy.get()&&(isUserPaused(release)||downloaded>0));
         } catch (JSONException ignored) { }
         return state;
     }
     public String diagnostic() {
-        return "Updates: " + phase + " / " + error + "\nUpdate last check: " + prefs.getLong("lastChecked", 0) + "\n";
+        TransferProgress current=progress;UpdateProgress.Snapshot bytes=current==null?null:current.metrics.snapshot(System.nanoTime(),"downloading".equals(phase));
+        return "Updates: " + phase + " / " + error + "\nUpdate last check: " + prefs.getLong("lastChecked", 0)
+                +"\nUpdate download: "+(bytes==null?0:bytes.downloadedBytes)+"/"+(bytes==null?0:bytes.totalBytes)
+                +" / "+(bytes==null?0:bytes.activeConnections)+" connections\nUpdate user paused: "+isUserPaused(available)+"\n";
     }
     public void checkNow() { enqueue(() -> check(true), null); }
     public void foregroundCheck() {
@@ -86,7 +114,23 @@ public final class UpdateManager {
     public void backgroundCheck(Runnable completed) {
         enqueue(() -> { if (automaticChecks() && due()) check(true); }, completed);
     }
-    public void downloadNow() { enqueue(this::download, null); }
+    public void downloadNow() { enqueue(()->{UpdateManifest release=available;if(release!=null)clearUserPause(release);download();}, null); }
+    public void pauseDownload(){
+        UpdateManifest release=downloadingRelease;
+        if(release==null||!busy.get()||!"downloading".equals(phase)||userPauseRequested)return;
+        // Persist the choice before interrupting the download's coordinating worker. The download
+        // catch path flushes this marker before releasing single-flight ownership.
+        pausedReleaseHash=release.sha256;userPauseRequested=true;
+        prefs.edit().putString("pausedReleaseHash",release.sha256).apply();
+        cancelRequested=true;Thread thread=worker;if(thread!=null)thread.interrupt();
+        app.changed();
+    }
+    private boolean isUserPaused(UpdateManifest release){return release!=null&&release.sha256.equals(pausedReleaseHash);}
+    private void clearUserPause(UpdateManifest release) throws UpdateDownload.UpdateException{
+        if(!isUserPaused(release))return;
+        if(!prefs.edit().remove("pausedReleaseHash").commit())throw new UpdateDownload.UpdateException("UPDATE_STORAGE_ERROR");
+        pausedReleaseHash="";
+    }
     public void prepareInstall(java.util.function.Consumer<Intent> openInstaller) {
         enqueue(() -> {
             UpdateManifest release = ready;
@@ -105,11 +149,11 @@ public final class UpdateManager {
     }
     public void connectionStateChanged(){
         UpdateManifest release=ready;
-        if(release==null||busy.get()||!automaticInstalls()||Build.VERSION.SDK_INT<31||!vpnStopped()
+        if(release==null||busy.get()||isUserPaused(release)||!automaticInstalls()||Build.VERSION.SDK_INT<31||!vpnStopped()
                 ||!app.getPackageManager().canRequestPackageInstalls()||prefs.getInt("sessionId",-1)!=-1
                 ||prefs.getInt("automaticAttemptVersion",0)>=release.versionCode)return;
         enqueue(()->{
-            if(!vpnStopped()||!automaticInstalls()||ready!=release)return;
+            if(!vpnStopped()||!automaticInstalls()||ready!=release||isUserPaused(release))return;
             if(!prefs.edit().putInt("automaticAttemptVersion",release.versionCode).commit())
                 throw new UpdateDownload.UpdateException("UPDATE_STORAGE_ERROR");
             install(release,true);
@@ -209,29 +253,82 @@ public final class UpdateManager {
         phase = "checking"; error = ""; prefs.edit().putLong("lastChecked", System.currentTimeMillis()).apply(); app.changed();
         UpdateManifest release = downloader.fetchManifest(feedUrl(), UpdateIdentity.PACKAGE_NAME);
         if (!release.isNewerThan(BuildConfig.VERSION_CODE)) {
+            UpdateManifest old=available;if(old!=null)downloader.discardResume(old,directory);
             available = null; ready = null; prefs.edit().remove("manifest").remove("manifestFeed").apply();
+            progress=null;
             phase = "current"; app.log("updates", "UPDATE_CURRENT"); app.changed(); return;
         }
         if (!release.supportsSdk(Build.VERSION.SDK_INT)) throw new UpdateDownload.UpdateException("UPDATE_ANDROID_UNSUPPORTED");
-        UpdateManifest previous = ready;
-        available = release;
-        if (previous == null || !sameRelease(previous, release)) ready = null;
+        UpdateManifest previousAvailable=available,previousReady=ready;
+        if(previousAvailable!=null&&!sameRelease(previousAvailable,release))downloader.discardResume(previousAvailable,directory);
         if(!prefs.edit().putString("manifest", json(release).toString()).putString("manifestFeed", release.manifestUrl).commit())
             throw new UpdateDownload.UpdateException("UPDATE_STORAGE_ERROR");
-        if (ready != null) { verify(ready, apkFile(ready)); phase = sessionPhase(); }
-        else { phase = "available"; }
+        available = release;
+        if(previousAvailable!=null&&!previousAvailable.sha256.equals(release.sha256)){
+            pausedReleaseHash="";prefs.edit().remove("pausedReleaseHash").apply();
+        }
+        if(previousReady==null||!sameRelease(previousReady,release))ready=null;
+        if (ready != null) {
+            try{verify(ready, apkFile(ready));setProgress(release,release.sizeBytes);phase = sessionPhase();}
+            catch(Exception failure){ready=null;setProgress(release,downloader.resumableBytes(release,directory));throw failure;}
+        }else{
+            long restored=downloader.resumableBytes(release,directory);setProgress(release,restored);
+            phase=isUserPaused(release)?"paused":restored>0?"interrupted":"available";
+        }
         app.log("updates", "UPDATE_AVAILABLE"); app.changed();
-        if (ready == null && allowAutomaticDownload && wifiDownloads() && onWifi()) download();
+        if (ready == null && !isUserPaused(release)&&allowAutomaticDownload && wifiDownloads() && onWifi()) download();
     }
     private void download() throws Exception {
         UpdateManifest release = available;
         if (release == null || !release.isNewerThan(BuildConfig.VERSION_CODE)) throw new UpdateDownload.UpdateException("UPDATE_NOT_AVAILABLE");
+        // A fresh attempt starts its throughput clock after restored bytes have been counted.
+        UpdateProgress attempt=setProgress(release,downloader.resumableBytes(release,directory));
+        downloadingRelease=release;userPauseRequested=false;
         phase = "downloading"; error = ""; app.changed();
-        File file = downloader.download(release, directory);
-        try { verify(release, file); }
-        catch (Exception failure) { Files.deleteIfExists(file.toPath()); throw failure; }
-        ready = release; phase = "ready"; app.log("updates", "UPDATE_READY");
-        cleanup(file); notifyReady(release,false); app.changed();
+        try{
+            File file = downloader.download(release,directory,(downloaded,total,connections)->downloadProgress(release,attempt,downloaded,total,connections));
+            phase="verifying";app.changed();
+            verify(release,file);
+            ready=release;phase="ready";setProgress(release,release.sizeBytes);
+            // Successful core downloads remove their resume state; this idempotent call also
+            // handles a retained completed cache from a previous interrupted validation pass.
+            downloader.discardResume(release,directory);
+            if(!userPauseRequested)clearUserPause(release);
+            app.log("updates","UPDATE_READY");cleanup(file);notifyReady(release,false);app.changed();
+        }catch(Exception failure){
+            long restored=ready!=null&&sameRelease(ready,release)?release.sizeBytes:downloader.resumableBytes(release,directory);setProgress(release,restored);
+            if(userPauseRequested||isUserPaused(release)){
+                Thread.interrupted();
+                if(!prefs.edit().putString("pausedReleaseHash",release.sha256).commit())app.log("updates","UPDATE_STORAGE_ERROR");
+                error="";phase=ready!=null?"ready":"paused";app.log("updates","UPDATE_DOWNLOAD_PAUSED");
+            }else{
+                String code=failure instanceof UpdateDownload.UpdateException?((UpdateDownload.UpdateException)failure).code:"UPDATE_STORAGE_ERROR";
+                error=code;phase=ready!=null?sessionPhase():restored>0?"interrupted":"error";app.log("updates",code);
+            }
+            app.changed();
+        }finally{downloadingRelease=null;}
+    }
+    private UpdateProgress setProgress(UpdateManifest release,long restored){
+        UpdateProgress metrics=new UpdateProgress(release.sizeBytes,Math.max(0,Math.min(release.sizeBytes,restored)),System.nanoTime());
+        progress=new TransferProgress(release,metrics);
+        synchronized(progressNotifications){lastProgressNotificationNanos=System.nanoTime()-250_000_000L;lastPublishedDownloaded=restored;}
+        return metrics;
+    }
+    private void downloadProgress(UpdateManifest release,UpdateProgress attempt,long downloaded,long total,int connections){
+        TransferProgress current=progress;
+        if(downloadingRelease!=release||current==null||attempt!=current.metrics)return;
+        long now=System.nanoTime();
+        boolean restarted=downloaded==0&&connections==0&&total==attempt.totalBytes&&attempt.snapshot(now,false).downloadedBytes>0;
+        if(restarted)attempt.restart(now);
+        if(!attempt.update(downloaded,total,connections))return;
+        boolean notify=false;
+        synchronized(progressNotifications){
+            if(restarted||now-lastProgressNotificationNanos>=250_000_000L||(downloaded==total&&lastPublishedDownloaded!=total)){
+                lastProgressNotificationNanos=now;lastPublishedDownloaded=downloaded;notify=true;
+            }
+        }
+        if(restarted)app.log("updates","UPDATE_DOWNLOAD_RESTARTED");
+        if(notify)app.changed();
     }
     private boolean onWifi() {
         ConnectivityManager network = app.getSystemService(ConnectivityManager.class);
@@ -248,15 +345,24 @@ public final class UpdateManager {
     private void restore() {
         try {
             if(prefs.getInt("sessionVersion",0)<=BuildConfig.VERSION_CODE)clearSession();
-            UpdateManifest release = cachedManifest();
+            UpdateManifest release = storedManifest();
             if (release == null) { cleanup(null); return; }
+            if(!release.isNewerThan(BuildConfig.VERSION_CODE)||!release.supportsSdk(Build.VERSION.SDK_INT)){
+                downloader.discardResume(release,directory);cleanup(null);
+                prefs.edit().remove("manifest").remove("manifestFeed").remove("pausedReleaseHash").apply();pausedReleaseHash="";return;
+            }
             available = release;
             File file = apkFile(release);
-            if (file.isFile()) { verify(release, file); ready = release; phase = sessionPhase(); cleanup(file); }
-            else { phase = "available"; cleanup(null); }
+            if (file.isFile()) { verify(release, file); ready = release;setProgress(release,release.sizeBytes);phase = sessionPhase(); cleanup(file); }
+            else {
+                long restored=downloader.resumableBytes(release,directory);setProgress(release,restored);
+                phase=isUserPaused(release)?"paused":restored>0?"interrupted":"available";cleanup(null);
+            }
         } catch (Exception failure) {
-            ready = null; available = null; cleanup(null);
-            prefs.edit().remove("manifest").remove("manifestFeed").apply(); fail("UPDATE_CACHE_INVALID");
+            // A temporary storage/PackageManager error must not erase a previously valid APK.
+            ready=null;
+            if(available!=null)setProgress(available,downloader.resumableBytes(available,directory));
+            fail("UPDATE_CACHE_INVALID");
         }
         app.changed();
     }
@@ -266,10 +372,13 @@ public final class UpdateManager {
         return "confirmation".equals(prefs.getString("sessionState",""))?"confirmation":"installing";
     }
     private UpdateManifest cachedManifest() throws UpdateDownload.UpdateException {
+        UpdateManifest release=storedManifest();
+        return release!=null&&release.isNewerThan(BuildConfig.VERSION_CODE)&&release.supportsSdk(Build.VERSION.SDK_INT)?release:null;
+    }
+    private UpdateManifest storedManifest() throws UpdateDownload.UpdateException {
         String raw = prefs.getString("manifest", ""), feed = prefs.getString("manifestFeed", "");
         if (raw.isEmpty() || !feed.equals(feedUrl())) return null;
-        UpdateManifest release = UpdateManifest.parse(raw, feed, UpdateIdentity.PACKAGE_NAME);
-        return release.isNewerThan(BuildConfig.VERSION_CODE) && release.supportsSdk(Build.VERSION.SDK_INT) ? release : null;
+        return UpdateManifest.parse(raw, feed, UpdateIdentity.PACKAGE_NAME);
     }
     private File apkFile(UpdateManifest release) throws IOException {
         File file = new File(directory, "autopilot-update-" + release.versionCode + ".apk");
@@ -307,7 +416,10 @@ public final class UpdateManager {
     private static String hex(byte[] bytes) {
         StringBuilder out = new StringBuilder(); for (byte value : bytes) out.append(String.format(Locale.ROOT, "%02x", value & 255)); return out.toString();
     }
-    private static boolean sameRelease(UpdateManifest a, UpdateManifest b) { return a.versionCode == b.versionCode && a.sha256.equals(b.sha256) && a.sizeBytes == b.sizeBytes; }
+    private static boolean sameRelease(UpdateManifest a, UpdateManifest b) {
+        return a.versionCode==b.versionCode&&a.sha256.equals(b.sha256)&&a.sizeBytes==b.sizeBytes&&a.minSdk==b.minSdk
+                &&a.packageName.equals(b.packageName)&&a.versionName.equals(b.versionName)&&a.apkUrl.equals(b.apkUrl)&&a.manifestUrl.equals(b.manifestUrl);
+    }
     private static JSONObject json(UpdateManifest value) throws JSONException {
         return new JSONObject().put("schemaVersion", value.schemaVersion).put("packageName", value.packageName)
                 .put("versionCode", value.versionCode).put("versionName", value.versionName).put("minSdk", value.minSdk)
@@ -316,11 +428,19 @@ public final class UpdateManager {
     }
     private void cleanup(File keep) {
         File[] files = directory.listFiles(); if (files == null) return;
-        for (File file : files) if ((keep == null || !keep.equals(file)) && (file.getName().endsWith(".part") || file.getName().matches("autopilot-update-[0-9]+\\.apk"))) {
+        // Multipart files and their durable metadata belong exclusively to UpdateDownload.
+        for (File file : files) if ((keep == null || !keep.equals(file)) && file.getName().matches("autopilot-update-[0-9]+\\.apk")) {
             try { Files.deleteIfExists(file.toPath()); } catch (IOException ignored) { }
         }
     }
-    private void fail(String code) { error = code; phase = ready == null ? "error" : "ready"; app.log("updates", code); app.changed(); }
+    private void fail(String code) {
+        error=code;
+        if(ready!=null){if(!Set.of("installing","confirmation").contains(phase))phase="ready";}
+        else if(isUserPaused(available))phase="paused";
+        else if(progress!=null&&progress.metrics.snapshot(System.nanoTime(),false).downloadedBytes>0)phase="interrupted";
+        else phase="error";
+        app.log("updates",code);app.changed();
+    }
     private void notifyReady(UpdateManifest release,boolean confirmationRequired) {
         if(release==null)return;
         if (!confirmationRequired&&prefs.getInt("notifiedVersion", 0) >= release.versionCode) return;
@@ -338,6 +458,11 @@ public final class UpdateManager {
         case "" -> "";
         case "UPDATE_BUSY" -> "An update operation is already running.";
         case "UPDATE_HTTP_ERROR", "UPDATE_NETWORK_ERROR", "UPDATE_TIMEOUT" -> "Could not reach the update server. Try again later.";
+        case "UPDATE_CANCELLED" -> "The download was interrupted. Saved parts will be reused when it resumes.";
+        case "UPDATE_RANGE_INVALID" -> "The server returned an invalid download range. Try downloading again.";
+        case "UPDATE_RESPONSE_ENCODING" -> "The server changed the APK encoding. Autopilot kept it from being installed.";
+        case "UPDATE_DOWNLOAD_BUSY" -> "This update already has a download running. Wait for it to finish or pause.";
+        case "UPDATE_CACHE_ERROR" -> "The download cache could not be written. Check available device storage.";
         case "UPDATE_ANDROID_UNSUPPORTED" -> "This release requires a newer Android version.";
         case "UPDATE_PREVIEW_BUILD" -> "Preview builds use a separate app identity. Install a signed release APK for updates.";
         case "UPDATE_PACKAGE_MISMATCH", "UPDATE_SIGNER_MISMATCH", "UPDATE_HASH_MISMATCH", "UPDATE_VERSION_MISMATCH", "UPDATE_INVALID_APK" -> "The update failed identity or integrity verification. It will not be installed.";

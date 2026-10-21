@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fresh hosted emulator only. Synthetic native setup; no account, provider API or TUN.
+# Fresh hosted emulator only. Synthetic native/update probes; no account, provider API or TUN.
 set -Eeuo pipefail
 
 project="$(cd "${1:-.}" && pwd)"
@@ -19,13 +19,14 @@ collect_evidence() {
 trap collect_evidence EXIT
 
 test -f "$project/app/src/androidTest/java/app/autopilot/android/NativeCoreConfigTest.java"
+test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateDownloadRuntimeTest.java"
 adb wait-for-device
 adb logcat -c
 
 set +e
 gradle -p "$project" --no-daemon --console=plain \
   :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest,app.autopilot.android.UpdateDownloadRuntimeTest \
   2>&1 | tee "$results/native-core-gradle.log"
 gradle_status=${PIPESTATUS[0]}
 set -e
@@ -34,20 +35,42 @@ set -e
 set +e
 python3 - "$project" <<'PY' | tee "$results/junit-receipt.txt"
 from pathlib import Path
+from collections import Counter
 import sys
 import xml.etree.ElementTree as ET
 
 root = Path(sys.argv[1]) / "app/build/outputs/androidTest-results/connected"
+selected = {
+    "app.autopilot.android.NativeCoreConfigTest": {"emptyProductionBaselineIsAcceptedByActualAndroidCore"},
+    "app.autopilot.android.UpdateDownloadRuntimeTest": {
+        "concurrentRangesPublishOnlyCompleteVerifiedBytes",
+        "interruptedPrefixesResumeAcrossDownloaderInstances",
+    },
+}
 cases = []
 for report in root.rglob("*.xml"):
     tree = ET.parse(report)
     cases.extend(case for case in tree.iter("testcase")
-                 if case.get("classname", "") == "app.autopilot.android.NativeCoreConfigTest")
+                 if case.get("classname", "") in selected)
 failed = sum(case.find("failure") is not None for case in cases)
 errors = sum(case.find("error") is not None for case in cases)
 skipped = sum(case.find("skipped") is not None for case in cases)
-print(f"NATIVE_CORE_XML_RECEIPT tests={len(cases)} failures={failed} errors={errors} skipped={skipped}")
-if not cases or failed or errors or skipped:
+missing = []
+for classname, methods in selected.items():
+    observed = {case.get("name") for case in cases if case.get("classname") == classname}
+    missing.extend(f"{classname}.{method}" for method in sorted(methods - observed))
+expected = sum(len(methods) for methods in selected.values())
+counts = Counter((case.get("classname"), case.get("name")) for case in cases)
+duplicates = [f"{classname}.{method}" for (classname, method), count in counts.items() if count > 1]
+unexpected = [f"{classname}.{method}" for classname, method in counts if method not in selected[classname]]
+print(f"ANDROID_RUNTIME_XML_RECEIPT tests={len(cases)} expected={expected} failures={failed} errors={errors} skipped={skipped} missing={len(missing)} duplicates={len(duplicates)} unexpected={len(unexpected)}")
+for method in missing:
+    print(f"MISSING_SELECTED_TEST {method}")
+for method in duplicates:
+    print(f"DUPLICATE_SELECTED_TEST {method}")
+for method in unexpected:
+    print(f"UNEXPECTED_SELECTED_TEST {method}")
+if len(cases) != expected or missing or duplicates or unexpected or failed or errors or skipped:
     raise SystemExit(1)
 PY
 xml_status=${PIPESTATUS[0]}

@@ -27,8 +27,10 @@ public final class MainActivity extends Activity {
     private LinearLayout content, nodeList;
     private TextView phase, selected, detail, countries, oneStatus, octoStatus, nodeSummary, error, updateSummary;
     private AlertDialog updateDialog;
-    private TextView updateDialogStatus, updateDialogNotes;
-    private Button updateCheck, updateDownload, updateInstall;
+    private TextView updateDialogStatus, updateDialogNotes, updateProgressText;
+    private ProgressBar updateProgressBar;
+    private Button updateCheck, updateDownload, updateInstall, updatePause;
+    private String lastRenderedNodes;
     private Button connect, auto, retest;
     private final Runnable render = this::render;
     private boolean visible;
@@ -67,6 +69,7 @@ public final class MainActivity extends Activity {
         addText(accounts,"Sign in on this device. Sessions and imported configurations are encrypted with Android Keystore. Passwords are not saved.",12,MUTED); content.addView(accounts);
 
         LinearLayout updates=card();section(updates,"App updates");updateSummary=addText(updates,"Autopilot "+BuildConfig.VERSION_NAME,13,MUTED);
+        addText(updates,getString(R.string.update_download_features),12,MUTED);
         Button openUpdates=button("Updates",false);openUpdates.setOnClickListener(v->updatesDialog());updates.addView(openUpdates,full());content.addView(updates);
 
         LinearLayout nodes=card();section(nodes,"Nodes");nodeSummary=addText(nodes,"No nodes yet",13,MUTED);nodeList=column();nodes.addView(nodeList);content.addView(nodes);
@@ -97,6 +100,10 @@ public final class MainActivity extends Activity {
         JSONArray list=app.engine==null&&!p.equals("error")?null:s.optJSONArray("nodes");if(list==null){list=new JSONArray();for(Node n:app.providers.nodes()){JSONObject o=new JSONObject();try{o.put("name",n.name).put("country",n.country).put("provider",n.provider).put("status","Not tested");}catch(JSONException ignored){}list.put(o);}}
         int skippedCount=s.optInt("skippedCount");
         nodeSummary.setText(getResources().getQuantityString(R.plurals.node_summary,list.length(),list.length())+(skippedCount>0?" · "+skippedCount+" incompatible nodes skipped":""));
+        // Download progress can arrive four times per second. Rebuild node views only when their
+        // content or selection changes; account and update status above remain live.
+        String nodesKey=current+"\n"+list;
+        if(nodesKey.equals(lastRenderedNodes))return;lastRenderedNodes=nodesKey;
         nodeList.removeAllViews();
         for(int i=0;i<list.length();i++){
             JSONObject node=list.optJSONObject(i);if(node==null)continue;String name=node.optString("name");
@@ -192,7 +199,7 @@ public final class MainActivity extends Activity {
             case "Updates"->updatesDialog();case "Bypass apps"->bypassDialog();case "Diagnostics"->diagnostics();case "Android app settings"->startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));case "About & licenses"->about();default->{} }return true;});menu.show();}
     private String updateStatus(JSONObject state){
         String phase=state.optString("phase"),version=state.optString("versionName");
-        String status=switch(phase){case "checking"->"Checking for updates…";case "downloading"->"Downloading and verifying "+version+"…";case "installing"->"Android is installing version "+version;case "confirmation"->"Android needs your confirmation to install "+version;case "ready"->"Version "+version+" is ready to install";case "available"->"Version "+version+" is available";case "current"->"You have the latest version";case "error"->"Update needs attention";default->"Automatic update checks are ready";};
+        String status=switch(phase){case "checking"->"Checking for updates…";case "downloading"->state.optBoolean("downloadPausing")?"Pausing download…":"Downloading "+version+"…";case "verifying"->"Verifying version "+version+"…";case "paused"->"Download paused. Saved parts are kept.";case "interrupted"->"Download interrupted. Ready to resume.";case "installing"->"Android is installing version "+version;case "confirmation"->"Android needs your confirmation to install "+version;case "ready"->"Version "+version+" is ready to install";case "available"->"Version "+version+" is available";case "current"->"You have the latest version";case "error"->"Update needs attention";default->"Automatic update checks are ready";};
         if(state.optBoolean("ready")&&phase.equals("ready")&&app.updates.automaticInstalls())status+=!state.optBoolean("installPermission")?"\nAllow updates from Autopilot to enable installation.":state.optBoolean("vpnDefersInstall")?"\nAutomatic installation waits until the VPN is stopped.":Build.VERSION.SDK_INT<31?"\nTap Install update to continue.":"\nAutomatic installation is enabled.";
         String failure=UpdateManager.message(state.optString("error"));
         return status+(failure.isEmpty()?"":"\n"+failure);
@@ -206,14 +213,42 @@ public final class MainActivity extends Activity {
         String checkedText=checked==0?"Never":DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.MEDIUM).format(new Date(checked));
         updateDialogStatus.setText(getString(R.string.update_checked_summary,summary,checkedText));
         String notes=state.optString("notes");updateDialogNotes.setText(notes);updateDialogNotes.setVisibility(notes.isEmpty()?View.GONE:View.VISIBLE);
+        long total=Math.max(0,Math.min(UpdateManifest.MAX_APK_BYTES,state.optLong("downloadTotalBytes")));
+        long downloaded=Math.max(0,Math.min(total,state.optLong("downloadedBytes")));
+        int percent=total==0?0:(int)(downloaded*100/total);boolean showProgress=state.optBoolean("available")&&total>0;
+        updateProgressBar.setVisibility(showProgress?View.VISIBLE:View.GONE);updateProgressText.setVisibility(showProgress?View.VISIBLE:View.GONE);updateProgressBar.setProgress(percent);
+        if(showProgress){
+            String transfer=getString(R.string.update_download_amount,percent,formatBytes(downloaded),formatBytes(total));
+            if("downloading".equals(state.optString("phase"))){
+                long speed=Math.max(0,state.optLong("downloadBytesPerSecond")),eta=state.optLong("downloadEtaSeconds",-1);
+                int connections=Math.max(0,Math.min(UpdateProgress.MAX_CONNECTIONS,state.optInt("downloadConnections")));
+                transfer+="\n"+getString(R.string.update_download_speed_eta,formatBytes(speed),formatEta(eta))
+                        +"\n"+getResources().getQuantityString(R.plurals.update_active_connections,connections,connections);
+            }
+            updateProgressText.setText(transfer);
+        }
         boolean busy=state.optBoolean("busy");updateCheck.setEnabled(!busy);updateDownload.setEnabled(!busy&&state.optBoolean("available")&&!state.optBoolean("ready"));updateInstall.setEnabled(!busy&&state.optBoolean("ready"));
+        updateDownload.setText(state.optBoolean("canResume")?R.string.update_resume_download:R.string.update_download);
+        updatePause.setVisibility(busy&&"downloading".equals(state.optString("phase"))?View.VISIBLE:View.GONE);updatePause.setEnabled(state.optBoolean("canPause"));
+        updatePause.setText(state.optBoolean("downloadPausing")?R.string.update_pausing_download:R.string.update_pause_download);
+    }
+    private String formatBytes(long bytes){return android.text.format.Formatter.formatShortFileSize(this,Math.max(0,bytes));}
+    private String formatEta(long seconds){
+        if(seconds<0)return getString(R.string.update_eta_unknown);
+        if(seconds<60)return getString(R.string.update_eta_seconds,seconds);
+        if(seconds<3600)return getString(R.string.update_eta_minutes,seconds/60,seconds%60);
+        return getString(R.string.update_eta_hours,seconds/3600,(seconds%3600)/60);
     }
     private void updatesDialog(){
         if(isFinishing()||isDestroyed()||(updateDialog!=null&&updateDialog.isShowing()))return;
         LinearLayout body=column();body.setPadding(dp(20),dp(8),dp(20),dp(12));
         updateDialogStatus=addText(body,"",14,INK);updateDialogNotes=addText(body,"",13,MUTED);updateDialogNotes.setTextIsSelectable(true);
+        updateProgressBar=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);updateProgressBar.setMax(100);body.addView(updateProgressBar,full());
+        updateProgressText=addText(body,"",13,MUTED);
+        addText(body,getString(R.string.update_download_features),12,MUTED);
         updateCheck=button("Check now",false);updateCheck.setOnClickListener(v->app.updates.checkNow());body.addView(updateCheck,full());
         updateDownload=button("Download update",false);updateDownload.setOnClickListener(v->app.updates.downloadNow());body.addView(updateDownload,full());
+        updatePause=button(getString(R.string.update_pause_download),false);updatePause.setOnClickListener(v->app.updates.pauseDownload());body.addView(updatePause,full());
         updateInstall=button("Install update",true);updateInstall.setOnClickListener(v->installUpdate());body.addView(updateInstall,full());
         addText(body,"Installing restarts Autopilot. Reopen it to reconnect. Your accounts and preferences are kept.",12,MUTED);
         CheckBox automatic=new CheckBox(this);automatic.setText(R.string.update_automatic_checks);automatic.setChecked(app.updates.automaticChecks());body.addView(automatic);
@@ -225,7 +260,7 @@ public final class MainActivity extends Activity {
         Button server=button("Update server",false);server.setOnClickListener(v->updateServerDialog());body.addView(server,full());
         ScrollView scroll=new ScrollView(this);scroll.addView(body);
         updateDialog=new AlertDialog.Builder(this).setTitle("App updates").setView(scroll).setPositiveButton("Close",null).create();
-        updateDialog.setOnDismissListener(d->{updateDialog=null;updateDialogStatus=null;updateDialogNotes=null;updateCheck=null;updateDownload=null;updateInstall=null;});updateDialog.show();renderUpdates();
+        updateDialog.setOnDismissListener(d->{updateDialog=null;updateDialogStatus=null;updateDialogNotes=null;updateProgressBar=null;updateProgressText=null;updateCheck=null;updateDownload=null;updatePause=null;updateInstall=null;});updateDialog.show();renderUpdates();
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED&&!getPreferences(MODE_PRIVATE).getBoolean("updateNotificationAsked",false)){
             getPreferences(MODE_PRIVATE).edit().putBoolean("updateNotificationAsked",true).apply();requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},104);
         }

@@ -5,4 +5,19 @@
     <string name="update_automatic_checks">Automatically check for updates</string>
     <string name="update_wifi_downloads">Automatically download on unmetered Wi-Fi</string>
     <string name="update_automatic_installs">Install automatically while VPN is stopped (Android 12+)</string>
+    <string name="update_download_features">Downloads use up to 4 connections and can resume after interruption.</string>
+    <string name="update_download">Download update</string>
+    <string name="update_resume_download">Resume download</string>
+    <string name="update_pause_download">Pause download</string>
+    <string name="update_pausing_download">Pausing…</string>
+    <string name="update_download_amount">%1$d%% · %2$s of %3$s</string>
+    <string name="update_download_speed_eta">%1$s/s · ETA %2$s</string>
+    <string name="update_eta_unknown">estimating…</string>
+    <string name="update_eta_seconds">%1$d s</string>
+    <string name="update_eta_minutes">%1$d min %2$d s</string>
+    <string name="update_eta_hours">%1$d h %2$d min</string>
+    <plurals name="update_active_connections">
+        <item quantity="one">%d active connection</item>
+        <item quantity="other">%d active connections</item>
+    </plurals>
 </resources>
