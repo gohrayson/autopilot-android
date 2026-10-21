@@ -120,3 +120,39 @@ phone, automatic background scheduling on HyperOS, and PackageInstaller's
 silent-versus-confirmation behavior on that phone remain unverified. The updater
 waits for the VPN to stop before automatic installation and handles Android's
 pending-user-confirmation result.
+
+## Publication and release-source recheck
+
+After the dry run verified the signed APK and byte-for-byte corresponding clean
+source archive, publication used:
+
+```powershell
+node android/tools/publish-update.cjs --dry-run --notes-file .data/android-release-notes.txt
+node android/tools/publish-update.cjs --publish --notes-file .data/android-release-notes.txt
+```
+
+The publisher returned `"published": true` and all uploaded asset digests matched
+the local files. The public latest-release API independently reported release
+`419574483`, tag `android-v0.1.2`, `draft: false`, and the same APK size/hash above.
+Release: <https://github.com/gohrayson/autopilot-android/releases/tag/android-v0.1.2>.
+Public feed:
+<https://github.com/gohrayson/autopilot-android/releases/latest/download/latest.json>.
+The release tag corresponds to source commit
+`0bcd77e14c70db51cbfbc023aa1f41c092c78514`. Published source archive SHA-256:
+`f61c0827e1558cc30124f523bd2b7d3b2bdc0a875487ebe55132347de57dce15`.
+
+The release-source CI reran the same native instrumentation invocation documented
+in [the runtime receipt](ANDROID_HOSTED_RUNTIME_RECEIPTS.md). Run
+[39605733943](https://github.com/gohrayson/autopilot-android/actions/runs/39605733943),
+job `119241310420`, completed successfully. Verbatim job-log lines (UTC):
+
+```text
+2026-10-21T13:13:23.0085334Z Starting 1 tests on emulator-5554 - 15
+2026-10-21T13:13:23.7131314Z Finished 1 tests on emulator-5554 - 15
+2026-10-21T13:13:24.5818001Z BUILD SUCCESSFUL in 23s
+2026-10-21T13:13:24.9363807Z NATIVE_CORE_XML_RECEIPT tests=1 failures=0 errors=0 skipped=0
+```
+
+This section and the hosted-download result are post-publication evidence. The
+already published APK and corresponding source ZIP are retained unchanged; the
+release ZIP contains the earlier receipt state from before publication.
