@@ -176,3 +176,62 @@ SHA256: ed1798448c1f9c1dd272347db4d91b5ce29e7e08ddbcace5810ca6105145b26c
 ```
 
 The production APK bytes are identical to the earlier verified release build.
+
+## Published release and existing-updater discovery
+
+After the source archive was regenerated and checked against the final working
+tree byte for byte, publication used:
+
+```powershell
+node android/tools/publish-update.cjs --dry-run --notes-file .data/android-release-notes-013.txt
+node android/tools/publish-update.cjs --publish --notes-file .data/android-release-notes-013.txt
+```
+
+The publisher returned `"published": true`. Independent GitHub API readback
+confirmed public release `419645685`, tag `android-v0.1.3`, `draft: false`, and
+the expected server-reported digests for every uploaded asset. APK size/hash are
+the verified values above. Source archive SHA-256:
+`3ce17650f2df2ce9fac2b4574acda40bf0869bb15577d04695fc230daf36b61c`.
+Release source commit: `926d59d901f5bccb4c67a8eb09b4698b8446ed4c`.
+Release: <https://github.com/gohrayson/autopilot-android/releases/tag/android-v0.1.3>.
+Existing public feed:
+<https://github.com/gohrayson/autopilot-android/releases/latest/download/latest.json>.
+
+Backward discovery was probed using the actual `UpdateManifest.java` and
+`UpdateDownload.java` read from the published `android-v0.1.2` Git tag. They were
+compiled into a fresh private class directory, not against current production
+sources. A reflection guard requires the pre-parallel downloader API. An initial
+attempt to reuse old probe classes correctly failed that guard because those
+classes had been rebuilt; the successful run below uses explicit tagged sources.
+The old transport used this JVM's existing localhost HTTPS proxy only.
+
+```powershell
+& .data/hosted-update-probe/probe-legacy.ps1 2>&1 |
+  Tee-Object -FilePath 'D:\Github\onevpn-autopilot\.data\android-v013-legacy-discovery-tagged.log'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+```
+
+Verbatim output (exit 0):
+
+```text
+LEGACY_012_UPDATE_DISCOVERY_PASS version=0.1.3 versionCode=4 newerThanInstalled3=true Android16Supported=true sha256=ed1798448c1f9c1dd272347db4d91b5ce29e7e08ddbcace5810ca6105145b26c
+```
+
+Thus the 0.1.2 feed parser/transport finds 0.1.3 as a newer Android 16-compatible
+release with the expected APK digest. This does not claim that a physical phone
+has downloaded or installed it. The old updater necessarily uses its old transfer
+engine until the update is installed. This section is post-publication evidence;
+published release assets and their corresponding source ZIP remain unchanged.
+
+The exact release source commit also passed the hosted Android invocation in
+[run 39615197719](https://github.com/gohrayson/autopilot-android/actions/runs/39615197719),
+job `119274249463`. The invocation and XML method catalog are documented in
+[ANDROID_DOWNLOAD_ANDROID_RECEIPTS.md](ANDROID_DOWNLOAD_ANDROID_RECEIPTS.md).
+Verbatim final release-source job-log lines:
+
+```text
+2026-10-21T14:17:31.6983657Z Starting 3 tests on emulator-5554 - 15
+2026-10-21T14:17:33.5052446Z Finished 3 tests on emulator-5554 - 15
+2026-10-21T14:17:34.3976168Z BUILD SUCCESSFUL in 24s
+2026-10-21T14:17:34.7635470Z ANDROID_RUNTIME_XML_RECEIPT tests=3 expected=3 failures=0 errors=0 skipped=0 missing=0 duplicates=0 unexpected=0
+```
