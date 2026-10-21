@@ -1,0 +1,11 @@
+**/.gradle/
+**/build/
+**/.data/
+**/local.properties
+*.aar
+*.apk
+*.jks
+*.keystore
+*.enc
+*.dpapi
+*.log

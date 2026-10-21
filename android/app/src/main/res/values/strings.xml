@@ -1,0 +1,6 @@
+<resources>
+    <plurals name="node_summary">
+        <item quantity="one">%1$d node · Tap to switch once; hold to pin</item>
+        <item quantity="other">%1$d nodes · Tap to switch once; hold to pin</item>
+    </plurals>
+</resources>
