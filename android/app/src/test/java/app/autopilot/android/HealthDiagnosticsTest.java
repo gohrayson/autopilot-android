@@ -72,4 +72,9 @@ public class HealthDiagnosticsTest {
         for(var code:HealthDiagnostics.LatencyCode.values())assertNotNull(HealthDiagnostics.latencyMessage(code.name()));
         assertEquals("",HealthDiagnostics.latencyMessage(SECRET));assertEquals("",HealthDiagnostics.latencyMessage(null));
     }
+    @Test public void successfulNativeDelayAboveUserLimitIsReportedAsSlow()throws Exception{
+        HealthDiagnostics.Latency measured=HealthDiagnostics.latency(new JSONObject().put("code",0).put("data",4000));
+        HealthDiagnostics.Latency limited=HealthDiagnostics.threshold(measured,3000);assertEquals(4000,limited.millis);assertEquals(HealthDiagnostics.LatencyCode.LATENCY_SLOW,limited.code);
+        assertEquals(HealthDiagnostics.LatencyCode.LATENCY_OK,HealthDiagnostics.threshold(measured,5000).code);assertFalse(HealthDiagnostics.latencyMessage(limited.code.name()).isEmpty());
+    }
 }

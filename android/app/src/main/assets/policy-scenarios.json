@@ -1,0 +1,226 @@
+{
+  "schemaVersion": 1,
+  "now": 1000000,
+  "scoreCases": [
+    {
+      "id": "even-median-and-MAD",
+      "samples": [
+        {
+          "ms": 10,
+          "age": 0
+        },
+        {
+          "ms": 20,
+          "age": 0
+        }
+      ],
+      "expected": 17.5
+    },
+    {
+      "id": "failed-sample-fraction",
+      "samples": [
+        {
+          "ms": -1,
+          "age": 0
+        },
+        {
+          "ms": 200,
+          "age": 0
+        },
+        {
+          "ms": 100,
+          "age": 0
+        }
+      ],
+      "expected": 425
+    },
+    {
+      "id": "challenge-penalty",
+      "samples": [
+        {
+          "ms": 100,
+          "age": 0
+        }
+      ],
+      "verdicts": {
+        "claude": "challenged"
+      },
+      "expected": 400
+    },
+    {
+      "id": "expired-sample-does-not-bias",
+      "samples": [
+        {
+          "ms": 2500,
+          "age": 190000
+        },
+        {
+          "ms": 100,
+          "age": 0
+        }
+      ],
+      "expected": 100
+    },
+    {
+      "id": "stale-latency-ineligible",
+      "samples": [
+        {
+          "ms": 100,
+          "age": 90001
+        }
+      ],
+      "expected": null
+    },
+    {
+      "id": "latest-failure-ineligible",
+      "samples": [
+        {
+          "ms": 100,
+          "age": 1
+        },
+        {
+          "ms": -1,
+          "age": 0
+        }
+      ],
+      "expected": null
+    },
+    {
+      "id": "required-service-subset",
+      "samples": [
+        {
+          "ms": 100,
+          "age": 0
+        }
+      ],
+      "required": [
+        "chatgpt"
+      ],
+      "verdicts": {
+        "gemini": "blocked"
+      },
+      "expected": 100
+    },
+    {
+      "id": "configured-latency-ceiling",
+      "samples": [
+        {
+          "ms": 4000,
+          "age": 0
+        }
+      ],
+      "expected": null
+    },
+    {
+      "id": "measured-application-fallback",
+      "samples": [
+        {
+          "ms": 317,
+          "nativeMs": -1,
+          "signal": "application-https",
+          "age": 0
+        }
+      ],
+      "expected": 317
+    }
+  ],
+  "switchCases": [
+    {
+      "id": "healthy-thresholds-hold",
+      "currentMs": 100,
+      "candidateMs": 85,
+      "dwellMs": 31000,
+      "force": false,
+      "expected": false
+    },
+    {
+      "id": "healthy-thresholds-switch",
+      "currentMs": 100,
+      "candidateMs": 75,
+      "dwellMs": 31000,
+      "force": false,
+      "expected": true
+    },
+    {
+      "id": "minimum-dwell-holds",
+      "currentMs": 100,
+      "candidateMs": 70,
+      "dwellMs": 1000,
+      "force": false,
+      "expected": false
+    },
+    {
+      "id": "explicit-retest-bypasses-dwell-and-thresholds",
+      "currentMs": 100,
+      "candidateMs": 95,
+      "dwellMs": 1000,
+      "force": true,
+      "expected": true
+    },
+    {
+      "id": "higher-country-priority",
+      "currentMs": 40,
+      "candidateMs": 300,
+      "currentCountry": "SG",
+      "candidateCountry": "MY",
+      "preferred": [
+        "MY",
+        "SG"
+      ],
+      "dwellMs": 0,
+      "force": false,
+      "expected": true
+    },
+    {
+      "id": "lower-country-priority-holds",
+      "currentMs": 300,
+      "candidateMs": 40,
+      "currentCountry": "MY",
+      "candidateCountry": "SG",
+      "preferred": [
+        "MY",
+        "SG"
+      ],
+      "dwellMs": 31000,
+      "force": false,
+      "expected": false
+    }
+  ],
+  "confirmationCases": [
+    {
+      "id": "same-broad-origins",
+      "previousMask": 6,
+      "nextMask": 6,
+      "elapsedMs": 4000,
+      "expected": true
+    },
+    {
+      "id": "different-broad-origins",
+      "previousMask": 3,
+      "nextMask": 5,
+      "elapsedMs": 4000,
+      "expected": false
+    },
+    {
+      "id": "overlapping-broad-origins",
+      "previousMask": 7,
+      "nextMask": 6,
+      "elapsedMs": 4000,
+      "expected": true
+    },
+    {
+      "id": "must-wait-confirmation-interval",
+      "previousMask": 6,
+      "nextMask": 6,
+      "elapsedMs": 3999,
+      "expected": false
+    },
+    {
+      "id": "single-origin-is-not-broad",
+      "previousMask": 2,
+      "nextMask": 2,
+      "elapsedMs": 4000,
+      "expected": false
+    }
+  ]
+}

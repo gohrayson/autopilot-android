@@ -1,0 +1,9 @@
+{
+  "name": "geoip.metadb",
+  "size": 8422018,
+  "sha256": "5c36afe6534dd3ef5e79a565ba2701fd511ff0a5b5fd6542e1abf58e76ee795a",
+  "source": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/e8bc98173ca4819600fac6618a4eb9312a86b8f4/geoip.metadb",
+  "project": "https://github.com/MetaCubeX/meta-rules-dat",
+  "license": "GPL-3.0",
+  "licenseFile": "geoip-LICENSE.txt"
+}

@@ -35,9 +35,9 @@ import javax.net.ssl.HttpsURLConnection;
 /** Bounded public HTTPS downloads. Redirects stay within the source origin or GitHub's release hosts. */
 public final class UpdateDownload {
     public static final int MAX_REDIRECTS = 3;
-    public static final int PARALLEL_CONNECTIONS = 4;
-    public static final long PARALLEL_MIN_BYTES = 4L * 1024 * 1024;
-    private static final int MAX_ATTEMPTS = 3;
+    public static final int PARALLEL_CONNECTIONS = ProductContract.policyInt("updateMaxConnections");
+    public static final long PARALLEL_MIN_BYTES = ProductContract.policyLong("updateParallelMinBytes");
+    private static final int MAX_ATTEMPTS = ProductContract.policyInt("updateAttempts");
     private static final ConcurrentHashMap<String, ReentrantLock> CACHE_LOCKS = new ConcurrentHashMap<>();
     public static final class UpdateException extends IOException {
         public final String code;
@@ -71,7 +71,7 @@ public final class UpdateDownload {
         this(new HttpsTransport(activeProxyPort, routeObserver, (uri, proxy) ->
                 (HttpsURLConnection) uri.toURL().openConnection(proxy)));
     }
-    public UpdateDownload(Transport transport) { this(transport, 30_000); }
+    public UpdateDownload(Transport transport) { this(transport, ProductContract.policyLong("updateManifestDeadlineMs")); }
     UpdateDownload(Transport transport, long manifestTimeoutMillis) {
         if (transport == null) throw new IllegalArgumentException("transport");
         if (manifestTimeoutMillis <= 0) throw new IllegalArgumentException("manifestTimeoutMillis");
@@ -117,7 +117,7 @@ public final class UpdateDownload {
 
     public File download(UpdateManifest manifest, File privateCacheDirectory, ProgressListener listener) throws UpdateException {
         URI apk = checkedApk(manifest);
-        long deadline = System.nanoTime() + 600_000_000_000L;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(ProductContract.policyLong("updateTransferDeadlineMs"));
         Session session = new Session(deadline);
         ReentrantLock lock = null;
         Path resume = null;
@@ -439,7 +439,7 @@ public final class UpdateDownload {
     }
     private static void backoff(int attempt, Session session) throws IOException {
         session.check();
-        try { Thread.sleep(200L << attempt); }
+        try { Thread.sleep(ProductContract.policyLong("updateRetryBaseMs") << attempt); }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw error("UPDATE_CANCELLED"); }
         session.check();
     }
@@ -590,8 +590,8 @@ public final class UpdateDownload {
             try { connection = connections.open(uri, proxy); }
             catch (IOException failure) { throw routedFailure(failure, vpn); }
             connection.setInstanceFollowRedirects(false);
-            connection.setConnectTimeout(20_000);
-            connection.setReadTimeout(20_000);
+            connection.setConnectTimeout(ProductContract.policyInt("updateRequestTimeoutMs"));
+            connection.setReadTimeout(ProductContract.policyInt("updateRequestTimeoutMs"));
             connection.setUseCaches(false);
             connection.setRequestMethod("GET");
             connection.setRequestProperty("Accept", "application/json, application/vnd.android.package-archive, application/octet-stream");

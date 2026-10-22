@@ -9,8 +9,8 @@ import javax.net.ssl.HttpsURLConnection;
 
 /** Small, independent HTTPS requests. Platform certificate/hostname verification is never changed. */
 public final class ReachabilityChecks implements ConnectionWatchdog.Probe,AutoCloseable {
-    static final List<String> ORIGINS=List.of("https://www.gstatic.com/generate_204",
-            "https://api.openai.com/compliance/cookie_requirements","https://api.anthropic.com/");
+    static final List<String> ORIGINS=origins();
+    private static List<String> origins(){org.json.JSONArray sources=ProductContract.policy().optJSONArray("watchdogOrigins");ArrayList<String> values=new ArrayList<>();for(int i=0;i<sources.length();i++)values.add(sources.optJSONObject(i).optString("url"));return List.copyOf(values);}
     interface Opener { HttpsURLConnection open(URL target,Proxy proxy)throws IOException; }
     private final ExecutorService requests=Executors.newFixedThreadPool(3);
     private final ScheduledExecutorService deadlines=Executors.newSingleThreadScheduledExecutor();
@@ -23,7 +23,7 @@ public final class ReachabilityChecks implements ConnectionWatchdog.Probe,AutoCl
         final Set<HttpsURLConnection> active=ConcurrentHashMap.newKeySet();
         void cancel(){cancelled.set(true);for(HttpsURLConnection connection:active)connection.disconnect();}
     }
-    public ReachabilityChecks(){this(7000,(url,proxy)->(HttpsURLConnection)url.openConnection(proxy));}
+    public ReachabilityChecks(){this(ProductContract.policyLong("watchdogRoundMs"),(url,proxy)->(HttpsURLConnection)url.openConnection(proxy));}
     ReachabilityChecks(long timeoutMillis,Opener opener){this.timeoutMillis=timeoutMillis;this.opener=opener;}
     @Override public ConnectionWatchdog.Result check(int port)throws InterruptedException {
         if(closed||Thread.currentThread().isInterrupted())throw new InterruptedException();
@@ -43,7 +43,7 @@ public final class ReachabilityChecks implements ConnectionWatchdog.Probe,AutoCl
                 if(!reachable)failed|=1<<i;
             }catch(ExecutionException|TimeoutException|CancellationException failure){failed|=1<<i;}
             if(closed||Thread.currentThread().isInterrupted())throw new InterruptedException();
-            int latency=0;for(int i=0;i<timings.length;i++)if((failed&(1<<i))==0&&timings[i]>0&&(latency==0||timings[i]<latency))latency=timings[i];
+            ArrayList<Integer> successful=new ArrayList<>();for(int i=0;i<timings.length;i++)if((failed&(1<<i))==0&&timings[i]>0)successful.add(timings[i]);Collections.sort(successful);int latency=successful.isEmpty()?0:(int)Math.round((successful.get((successful.size()-1)/2)+successful.get(successful.size()/2))/2.0);
             return new ConnectionWatchdog.Result(failed,latency);
         }finally{
             round.cancel();deadline.cancel(false);for(Future<?> future:work)future.cancel(true);rounds.remove(round);

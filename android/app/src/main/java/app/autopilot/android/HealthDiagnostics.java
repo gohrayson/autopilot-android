@@ -8,7 +8,7 @@ public final class HealthDiagnostics {
     private HealthDiagnostics() {}
 
     public enum LatencyCode {
-        NOT_TESTED, LATENCY_OK, LATENCY_FAILED, CORE_ACTION_FAILED, CORE_RESPONSE_INVALID, CHECK_TIMEOUT, CORE_RESPONSE_FAILED
+        NOT_TESTED, LATENCY_OK, LATENCY_SLOW, LATENCY_FAILED, CORE_ACTION_FAILED, CORE_RESPONSE_INVALID, CHECK_TIMEOUT, CORE_RESPONSE_FAILED
     }
     public static final class Latency {
         public final int millis;
@@ -33,6 +33,7 @@ public final class HealthDiagnostics {
         if(value==null||value< -1||value>65535)return new Latency(-1,LatencyCode.CORE_RESPONSE_INVALID,code);
         return value>0?new Latency(value,LatencyCode.LATENCY_OK,code):new Latency(-1,LatencyCode.LATENCY_FAILED,code);
     }
+    public static Latency threshold(Latency result,int maximumMillis){return result.millis>=maximumMillis?new Latency(result.millis,LatencyCode.LATENCY_SLOW,result.nativeCode):result;}
     private static Integer integer(Object value){
         if(!(value instanceof Number))return null;
         double number=((Number)value).doubleValue();
@@ -100,6 +101,7 @@ public final class HealthDiagnostics {
         return switch(known){
             case NOT_TESTED->"Waiting for its first check";
             case LATENCY_OK->"";
+            case LATENCY_SLOW->"Connection check exceeded the configured latency limit";
             case LATENCY_FAILED->"Connection check failed";
             case CHECK_TIMEOUT->"Connection check timed out";
             case CORE_ACTION_FAILED->"The VPN core could not run this check";

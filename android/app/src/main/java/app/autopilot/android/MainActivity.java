@@ -26,7 +26,8 @@ public final class MainActivity extends Activity {
     private static final int DISABLED_BUTTON_BACKGROUND=0xffe3e5e9, DISABLED_BUTTON_TEXT=0xff8b919c, SECONDARY_BUTTON_BACKGROUND=0xffedf2ff;
     private AutopilotApp app;
     private LinearLayout content, nodeList;
-    private TextView phase, selected, detail, connectionHealth, countries, oneStatus, octoStatus, nodeSummary, error, updateSummary;
+    private TextView phase, selected, detail, connectionHealth, countries, oneStatus, octoStatus, importStatus, routingStatus, nodeSummary, error, updateSummary;
+    private Switch globalMode;
     private AlertDialog updateDialog;
     private TextView updateDialogStatus, updateDialogNotes, updateProgressText, updateActionHint;
     private ProgressBar updateProgressBar;
@@ -59,16 +60,27 @@ public final class MainActivity extends Activity {
         connectionHealth=addText(status,"",13,MUTED);connectionHealth.setVisibility(View.GONE);
         error=addText(status,"",14,RED);
         connect=button("Start VPN",true); connect.setOnClickListener(v->toggleVpn()); status.addView(connect,full());
-        LinearLayout actions=row(); auto=button("Resume Auto",false); auto.setOnClickListener(v->{if(app.engine!=null)app.engine.resumeAuto();}); actions.addView(auto,new LinearLayout.LayoutParams(0,-2,1));
+        LinearLayout actions=row(); auto=button("Resume Auto",false); auto.setOnClickListener(v->{if(app.engine!=null){if(app.settings().optBoolean("paused")||app.state().optBoolean("pinned"))app.engine.resumeAuto();else app.engine.pauseAuto();}}); actions.addView(auto,new LinearLayout.LayoutParams(0,-2,1));
         retest=button("Re-test",false); retest.setOnClickListener(v->{if(app.engine!=null)app.engine.retest();}); actions.addView(retest,new LinearLayout.LayoutParams(0,-2,1));status.addView(actions);content.addView(status);
 
         LinearLayout country=card();section(country,"Preferred countries");countries=addText(country,"Fastest healthy node anywhere",15,INK);
         addText(country,"Uses your first country with healthy, service-checked nodes. Falls back to other countries when needed.",13,MUTED);
         Button edit=button("Edit priority order",false);edit.setOnClickListener(v->countryDialog());country.addView(edit,full());content.addView(country);
 
+        LinearLayout routing=card();section(routing,"Routing & automatic selection");
+        globalMode=new Switch(this);globalMode.setText("Global mode");routing.addView(globalMode,full());
+        globalMode.setOnCheckedChangeListener((view,on)->{if(app.settings().optBoolean("globalMode")!=on)try{app.setSettings(new JSONObject().put("globalMode",on));}catch(Exception invalid){toast(invalid.getMessage());render();}});
+        routingStatus=addText(routing,"",13,MUTED);
+        Button split=button("Split tunneling & websites",false);split.setOnClickListener(v->splitDialog());routing.addView(split,full());
+        Button settings=button("Automatic selection settings",false);settings.setOnClickListener(v->settingsDialog());routing.addView(settings,full());content.addView(routing);
+
         LinearLayout accounts=card();section(accounts,"VPN accounts");
         oneStatus=accountRow(accounts,"OneVPN","onevpn");octoStatus=accountRow(accounts,"Octohide","octohide");
         addText(accounts,"Sign in on this device. Sessions and imported configurations are encrypted with Android Keystore. Passwords are not saved.",12,MUTED); content.addView(accounts);
+
+        LinearLayout imports=card();section(imports,"Imported configuration");importStatus=addText(imports,"No imported nodes",13,MUTED);
+        Button load=button("Import / replace configuration",false);load.setOnClickListener(v->importConfiguration());imports.addView(load,full());
+        Button remove=button("Remove imported configuration",false);remove.setOnClickListener(v->{if(app.providers.status("import").optInt("nodeCount")==0){toast("No imported configuration");return;}new AlertDialog.Builder(this).setTitle("Remove imported configuration?").setMessage("Removes only the encrypted imported nodes. Provider accounts remain connected.").setPositiveButton("Remove",(d,w)->providerJob("import",()->app.providers.logout("import"))).setNegativeButton("Cancel",null).show();});imports.addView(remove,full());content.addView(imports);
 
         LinearLayout updates=card();section(updates,"App updates");updateSummary=addText(updates,"Autopilot "+BuildConfig.VERSION_NAME,13,MUTED);
         addText(updates,getString(R.string.update_download_features),12,MUTED);
@@ -117,9 +129,17 @@ public final class MainActivity extends Activity {
         connectionHealth.setText(healthMessage);connectionHealth.setVisibility(healthMessage.isEmpty()?View.GONE:View.VISIBLE);
         error.setText(errorMessage(s.optString("error","")));error.setVisibility(error.getText().length()==0?View.GONE:View.VISIBLE);
         connect.setText(running?"Stop VPN":"Start VPN");connect.setEnabled(running||!app.providers.nodes().isEmpty());
+        JSONObject common=app.settings();auto.setText(common.optBoolean("paused")||s.optBoolean("pinned")?"Resume Auto":"Pause Auto");
         auto.setEnabled(running); retest.setEnabled(running&&!s.optBoolean("busy"));
+        globalMode.setChecked(common.optBoolean("globalMode"));
+        String routing=common.optBoolean("globalMode")?"Global: captured traffic uses the VPN, except website overrides.":"Rule mode: website overrides, then regional direct routing, then VPN.";
+        if(!common.optBoolean("globalMode")&&!AndroidRouting.geoAvailable(app))routing+=" Regional database unavailable: unmatched traffic uses the VPN.";
+        routing+="\nApps: "+common.optString("splitMode","off")+". Website rules apply only to apps captured by the VPN.";
+        if(app.routingRestartPending())routing+="\nApp routing changes are pending. Stop and start VPN when ready to apply them.";
+        routingStatus.setText(routing);routingStatus.setTextColor(app.routingRestartPending()?RED:MUTED);
         List<String> pref=app.preferred();countries.setText(pref.isEmpty()?"Fastest healthy node anywhere":String.join("  →  ",pref.stream().map(MainActivity::countryName).collect(java.util.stream.Collectors.toList())));
         renderAccount("onevpn",oneStatus);renderAccount("octohide",octoStatus);
+        JSONObject imported=app.providers.status("import");importStatus.setText(importSummary(imported));
         renderUpdates();
         JSONArray list=app.engine==null&&!p.equals("error")?null:s.optJSONArray("nodes");if(list==null){list=new JSONArray();for(Node n:app.providers.nodes()){JSONObject o=new JSONObject();try{o.put("name",n.name).put("country",n.country).put("provider",n.provider).put("status","Not tested");}catch(JSONException ignored){}list.put(o);}}
         int skippedCount=s.optInt("skippedCount");
@@ -180,16 +200,26 @@ public final class MainActivity extends Activity {
         case "CORE_CONFIG_REJECTED"->"The VPN core rejected the configuration. Open Diagnostics for the recorded reason.";
         case "SELECTOR_MISMATCH","CORE_ACTION_FAILED"->"The VPN core could not select the requested node. Open Diagnostics.";
         case "TUN_START_FAILED"->"Android’s VPN interface could not start. Stop any other VPN on this device and retry.";
+        case "SPLIT_APPS_UNAVAILABLE"->"The apps selected for VPN-only routing are no longer installed. Edit Split tunneling before starting.";
         case "VPN_PERMISSION_REQUIRED"->"Accept Android’s VPN permission to start Autopilot.";
         default->"The VPN needs attention. Open Diagnostics for the error code.";};}
     private void renderAccount(String provider,TextView target){
-        JSONObject s=app.providers.status(provider);StringBuilder text=new StringBuilder();
-        String user=s.optString("username","");text.append(user.isEmpty()?"Not signed in":user).append("\n");
-        text.append(s.optString("phase","disconnected")).append(" · ").append(s.optInt("nodeCount")).append(" cached nodes");
-        long retry=s.optLong("retryAt");if(retry>System.currentTimeMillis())text.append("\nNext request: ").append(DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.MEDIUM).format(new Date(retry)));
-        String error=s.isNull("error")?"":s.optString("error","");if(!error.isEmpty())text.append("\n").append(error);
-        if(provider.equals(app.providerBusy))text.append("\nWorking…");target.setText(text);
+        JSONObject s=app.providers.status(provider);String text=accountSummary(s,System.currentTimeMillis());
+        if(provider.equals(app.providerBusy))text+="\nWorking…";target.setText(text);
     }
+    static String accountSummary(JSONObject s,long now){
+        String user=s.optString("username","");StringBuilder text=new StringBuilder(user.isEmpty()?"Not signed in":user);
+        text.append("\n").append(s.optString("phase","disconnected")).append(" · ").append(s.optInt("nodeCount")).append(" cached nodes");
+        if(s.optBoolean("connected")){
+            text.append("\n").append(s.optBoolean("paid")?"Paid subscription":"Subscription status unavailable");
+            long expiry=s.optLong("subscriptionEnd");if(expiry>0)text.append(expiry<now?" · expired ":" · ends ").append(DateFormat.getDateInstance(DateFormat.MEDIUM).format(new Date(expiry)));
+        }
+        long refreshed=s.optLong("lastRefresh");if(refreshed>0)text.append("\nServers refreshed: ").append(DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.MEDIUM).format(new Date(refreshed)));
+        long retry=s.optLong("retryAt");if(retry>now)text.append("\nNext request: ").append(DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.MEDIUM).format(new Date(retry)));
+        String error=s.isNull("error")?"":s.optString("error","");if(!error.isEmpty())text.append("\n").append(error);
+        return text.toString();
+    }
+    static String importSummary(JSONObject status){int count=status.optInt("nodeCount");String result=count==0?"No imported nodes":count+" imported nodes · "+status.optString("phase");long at=status.optLong("lastRefresh");return at>0?result+"\nImported: "+DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.MEDIUM).format(new Date(at)):result;}
     private TextView accountRow(LinearLayout parent,String title,String provider){
         addText(parent,title,18,INK).setTypeface(null,Typeface.BOLD);TextView status=addText(parent,"Not signed in",13,MUTED);
         LinearLayout actions=row();Button login=button("Sign in",false);login.setOnClickListener(v->loginDialog(provider,title));actions.addView(login,new LinearLayout.LayoutParams(0,-2,1));
@@ -229,6 +259,8 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(request==101){if(result==RESULT_OK)startVpn();else toast("VPN permission was not granted");}
         if(request==103&&result==RESULT_OK&&data!=null&&data.getData()!=null){Uri uri=data.getData();providerJob("import",()->{String text;try(InputStream in=getContentResolver().openInputStream(uri)){text=readText(in,8*1024*1024);}app.providers.importConfig(text);});}
+        if(request==105&&result==RESULT_OK&&data!=null&&data.getData()!=null){Uri uri=data.getData();app.providerExecutor.execute(()->{try{JSONObject patch;try(InputStream in=getContentResolver().openInputStream(uri)){patch=ProductSettings.portablePatch(new JSONObject(readText(in,1024*1024)));}JSONObject finalPatch=patch;runOnUiThread(()->new AlertDialog.Builder(this).setTitle("Import shared preferences?").setMessage("Applies service checks, country priorities, automatic selection and website rules. Accounts and app lists stay on this device. Changes apply immediately.").setPositiveButton("Apply",(d,w)->{try{app.setSettings(finalPatch);toast("Shared preferences imported");}catch(Exception invalid){toast(invalid.getMessage());}}).setNegativeButton("Cancel",null).show());}catch(Exception invalid){runOnUiThread(()->toast("Could not import shared preferences. Use an Autopilot preferences JSON file."));}});}
+        if(request==106&&result==RESULT_OK&&data!=null&&data.getData()!=null){Uri uri=data.getData();JSONObject exported=ProductSettings.portable(app.settings());app.providerExecutor.execute(()->{try(OutputStream out=getContentResolver().openOutputStream(uri,"wt")){if(out==null)throw new IOException();out.write(exported.toString(2).getBytes(StandardCharsets.UTF_8));runOnUiThread(()->toast("Shared preferences exported. Accounts and app lists were excluded."));}catch(Exception invalid){runOnUiThread(()->toast("Could not save preferences"));}});}
     }
     private void countryDialog(){
         LinearLayout outer=column();outer.setPadding(dp(20),0,dp(20),dp(12));LinearLayout rows=column();outer.addView(rows);
@@ -238,13 +270,15 @@ public final class MainActivity extends Activity {
                 Button up=button("↑",false);up.setMinWidth(0);up.setMinimumWidth(0);up.setEnabled(i>0);up.setOnClickListener(v->{List<String> p=app.preferred();Collections.swap(p,index,index-1);app.setPreferred(p);draw[0].run();});line.addView(up);
                 Button remove=button("×",false);remove.setMinWidth(0);remove.setMinimumWidth(0);remove.setOnClickListener(v->{List<String> p=app.preferred();p.remove(c);app.setPreferred(p);draw[0].run();});line.addView(remove);rows.addView(line);}
         };draw[0].run();
-        Button add=button("Add country",false);add.setOnClickListener(v->{List<String> codes=new ArrayList<>(Arrays.asList(Locale.getISOCountries()));codes.removeAll(app.preferred());codes.removeAll(List.of("CN","HK","MO"));codes.sort(Comparator.comparing(MainActivity::countryName));String[] names=codes.stream().map(MainActivity::countryName).toArray(String[]::new);new AlertDialog.Builder(this).setTitle("Choose a country").setItems(names,(d,w)->{List<String> p=app.preferred();if(p.size()>=32){toast("Choose up to 32 countries");return;}p.add(codes.get(w));app.setPreferred(p);draw[0].run();}).show();});outer.addView(add);
+        Button add=button("Add country",false);add.setOnClickListener(v->{List<String> codes=new ArrayList<>(Arrays.asList(Locale.getISOCountries()));codes.removeAll(app.preferred());codes.removeAll(ProductSettings.strings(ProductContract.policy().optJSONArray("excludedCountries")));codes.sort(Comparator.comparing(MainActivity::countryName));String[] names=codes.stream().map(MainActivity::countryName).toArray(String[]::new);new AlertDialog.Builder(this).setTitle("Choose a country").setItems(names,(d,w)->{List<String> p=app.preferred();int max=ProductContract.settingsSchema().optJSONObject("preferredRegions").optInt("maxItems");if(p.size()>=max){toast("Choose up to "+max+" countries");return;}p.add(codes.get(w));app.setPreferred(p);draw[0].run();}).show();});outer.addView(add);
         ScrollView scroll=new ScrollView(this);scroll.addView(outer);new AlertDialog.Builder(this).setTitle("Country priority").setView(scroll).setPositiveButton("Done",null).show();
     }
-    private void menu(View anchor){PopupMenu menu=new PopupMenu(this,anchor);String[] options={"Updates","Import configuration","Bypass apps","Diagnostics","Android app settings","About & licenses"};for(String option:options)menu.getMenu().add(option);
+    private void menu(View anchor){PopupMenu menu=new PopupMenu(this,anchor);String[] options={"Updates","Import configuration","Split tunneling & websites","Automatic selection settings","Export preferences","Import preferences","Events","Diagnostics","Android app settings","About & licenses"};for(String option:options)menu.getMenu().add(option);
         menu.setOnMenuItemClickListener(item->{switch(item.getTitle().toString()){
-            case "Import configuration"->startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),103);
-            case "Updates"->updatesDialog();case "Bypass apps"->bypassDialog();case "Diagnostics"->diagnostics();case "Android app settings"->startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));case "About & licenses"->about();default->{} }return true;});menu.show();}
+            case "Import configuration"->importConfiguration();
+            case "Updates"->updatesDialog();case "Split tunneling & websites"->splitDialog();case "Automatic selection settings"->settingsDialog();case "Export preferences"->exportPreferences();case "Import preferences"->startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("application/json").addCategory(Intent.CATEGORY_OPENABLE),105);case "Events"->reportDialog("Events",app.events());case "Diagnostics"->diagnostics();case "Android app settings"->startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));case "About & licenses"->about();default->{} }return true;});menu.show();}
+    private void importConfiguration(){startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),103);}
+    private void exportPreferences(){startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/json").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"autopilot-preferences.json"),106);}
     private String updateStatus(JSONObject state){
         String phase=state.optString("phase"),version=state.optString("versionName");
         String status=switch(phase){case "restoring"->"Checking saved update files…";case "checking"->"Checking for updates…";case "downloading"->state.optBoolean("downloadPausing")?"Pausing download…":"Downloading "+version+"…";case "verifying"->"Verifying version "+version+"…";case "preparing-install"->"Preparing Android’s installer…";case "paused"->"Download paused. Saved parts are kept.";case "interrupted"->"Download interrupted. Ready to resume.";case "installing"->"Android is installing version "+version;case "confirmation"->"Android needs your confirmation to install "+version;case "ready"->"Version "+version+" is ready to install";case "available"->"Version "+version+" is available";case "current"->"You have the latest version";case "error"->"Update needs attention";default->"Automatic update checks are ready";};
@@ -353,13 +387,42 @@ public final class MainActivity extends Activity {
         toast("Allow Autopilot to install updates, then return to Updates. Android may still ask you to confirm installation.");
         try{startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+getPackageName())));}catch(ActivityNotFoundException unavailable){toast("Open Android app settings and allow installs from Autopilot.");}
     }
-    private void bypassDialog(){
-        List<ResolveInfo> found=getPackageManager().queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),0);
-        TreeMap<String,String> apps=new TreeMap<>();for(ResolveInfo info:found)if(!info.activityInfo.packageName.equals(getPackageName()))apps.put(info.loadLabel(getPackageManager())+"\n"+info.activityInfo.packageName,info.activityInfo.packageName);
-        String[] labels=apps.keySet().toArray(String[]::new),packages=apps.values().toArray(String[]::new);Set<String> chosen=app.bypassPackages();boolean[] checked=new boolean[packages.length];for(int i=0;i<packages.length;i++)checked[i]=chosen.contains(packages[i]);
-        new AlertDialog.Builder(this).setTitle("Apps that bypass the VPN").setMultiChoiceItems(labels,checked,(d,i,on)->{if(on)chosen.add(packages[i]);else chosen.remove(packages[i]);}).setPositiveButton("Save",(d,w)->{app.setBypassPackages(chosen);toast("Saved. Applies the next time you start the VPN.");}).setNegativeButton("Cancel",null).show();
+    private AlertDialog settingsDialog(){
+        JSONObject saved=app.settings();LinearLayout body=column();body.setPadding(dp(20),dp(8),dp(20),dp(12));
+        addText(body,"Both platforms use these selection rules. Changes save together and apply immediately.",13,MUTED);
+        Map<String,CheckBox> services=new LinkedHashMap<>();Set<String> required=ProductSettings.strings(saved.optJSONArray("required"));
+        for(String service:ProductContract.services()){CheckBox checked=new CheckBox(this);checked.setText(service);checked.setChecked(required.contains(service));body.addView(checked);services.put(service,checked);}
+        addText(body,"Select at least one required service. A challenge page is usable but scores below unrestricted access.",12,MUTED);
+        Map<String,EditText> fields=new LinkedHashMap<>();
+        String[][] catalog={{"tickMs","Current-node check (seconds)","1000"},{"sweepMs","Node sweep interval (seconds)","1000"},{"verifyMs","Service-result lifetime (seconds)","1000"},{"maxLatencyMs","Maximum latency (milliseconds)","1"},{"failLimit","Consecutive failures before failover","1"},{"switchRatio","Replacement score as % of current (lower = larger improvement)","0.01"},{"minDwellMs","Minimum time before healthy upgrade (seconds)","1000"},{"checkTopK","Promising nodes to verify per sweep","1"}};
+        for(String[] item:catalog){addText(body,item[1],13,INK);EditText field=new EditText(this);field.setSingleLine(true);field.setInputType(InputType.TYPE_CLASS_NUMBER|InputType.TYPE_NUMBER_FLAG_DECIMAL);double factor=Double.parseDouble(item[2]),value=saved.optDouble(item[0])/factor;field.setText(value==Math.rint(value)?Long.toString((long)value):Double.toString(value));body.addView(field,full());fields.put(item[0],field);}
+        ScrollView scroll=new ScrollView(this);scroll.addView(body);AlertDialog dialog=new AlertDialog.Builder(this).setTitle("Automatic selection").setView(scroll).setPositiveButton("Save",null).setNegativeButton("Cancel",null).create();
+        dialog.setOnShowListener(d->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{try{
+            JSONObject patch=new JSONObject();JSONArray chosen=new JSONArray();for(Map.Entry<String,CheckBox> service:services.entrySet())if(service.getValue().isChecked())chosen.put(service.getKey());patch.put("required",chosen);
+            for(String[] item:catalog){double value=Double.parseDouble(fields.get(item[0]).getText().toString())*Double.parseDouble(item[2]);if(!Double.isFinite(value))throw new IllegalArgumentException("Enter valid numbers");if(item[0].equals("switchRatio"))patch.put(item[0],value);else{if(value!=Math.rint(value))throw new IllegalArgumentException("Use whole values for "+item[1]);patch.put(item[0],(long)value);}}
+            app.setSettings(patch);dialog.dismiss();toast("Selection settings saved");
+        }catch(Exception invalid){toast(invalid instanceof NumberFormatException?"Enter valid numbers":invalid.getMessage());}}));dialog.show();return dialog;
     }
-    private void diagnostics(){TextView text=text(app.diagnostics(),12,INK);text.setTextIsSelectable(true);text.setPadding(dp(18),dp(8),dp(18),dp(8));ScrollView scroll=new ScrollView(this);scroll.addView(text);new AlertDialog.Builder(this).setTitle("Diagnostics").setView(scroll).setPositiveButton("Copy",(d,w)->{((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Autopilot diagnostics",text.getText()));toast("Copied diagnostics");}).setNegativeButton("Close",null).show();}
+    private AlertDialog splitDialog(){
+        JSONObject saved=app.settings();LinearLayout body=column();body.setPadding(dp(20),dp(8),dp(20),dp(12));
+        addText(body,"Website overrides apply first inside the VPN. Android routes excluded apps outside the VPN, so website overrides cannot capture them. App-list changes apply after you stop and start VPN; website changes apply now.",13,MUTED);
+        Spinner mode=new Spinner(this);String[] modes={"off","bypass","only"};mode.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,new String[]{"All apps","Bypass selected apps","Only selected apps use VPN"}));int selectedMode=Arrays.asList(modes).indexOf(saved.optString("splitMode"));mode.setSelection(Math.max(0,selectedMode));body.addView(mode,full());
+        LinkedHashMap<String,Set<String>> chosen=new LinkedHashMap<>();chosen.put("bypass",new LinkedHashSet<>(ProductSettings.strings(saved.optJSONArray("bypassApps"))));chosen.put("only",new LinkedHashSet<>(ProductSettings.strings(saved.optJSONArray("onlyApps"))));
+        List<ResolveInfo> found=getPackageManager().queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),0);TreeMap<String,String> apps=new TreeMap<>();
+        for(ResolveInfo info:found)if(!info.activityInfo.packageName.equals(getPackageName()))apps.put(info.loadLabel(getPackageManager())+"\n"+info.activityInfo.packageName,info.activityInfo.packageName);
+        Set<String> listed=new HashSet<>(apps.values());for(Set<String> set:chosen.values())for(String pkg:set)if(!listed.contains(pkg)&&!pkg.equals(getPackageName())){apps.put(pkg+" (not listed)",pkg);listed.add(pkg);}
+        TextView emptyHint=addText(body,"An empty app list keeps all apps on the VPN.",12,MUTED);LinearLayout appRows=column();body.addView(appRows);
+        Runnable draw=()->{appRows.removeAllViews();String current=modes[mode.getSelectedItemPosition()];appRows.setVisibility(current.equals("off")?View.GONE:View.VISIBLE);if(!current.equals("off"))for(Map.Entry<String,String> item:apps.entrySet()){CheckBox check=new CheckBox(this);check.setText(item.getKey());check.setChecked(chosen.get(current).contains(item.getValue()));check.setOnCheckedChangeListener((b,on)->{if(on)chosen.get(current).add(item.getValue());else chosen.get(current).remove(item.getValue());});appRows.addView(check);}};
+        mode.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onNothingSelected(AdapterView<?> parent){}public void onItemSelected(AdapterView<?> parent,View view,int pos,long id){draw.run();}});draw.run();
+        addText(body,"Always direct websites (one domain per line)",13,INK);EditText direct=domainField(saved.optJSONArray("directDomains"));body.addView(direct,full());
+        addText(body,"Always through VPN websites (one domain per line)",13,INK);EditText proxy=domainField(saved.optJSONArray("proxyDomains"));body.addView(proxy,full());
+        ScrollView scroll=new ScrollView(this);scroll.addView(body);AlertDialog dialog=new AlertDialog.Builder(this).setTitle("Split tunneling").setView(scroll).setPositiveButton("Save",null).setNegativeButton("Cancel",null).create();
+        dialog.setOnShowListener(d->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{try{app.setSettings(new JSONObject().put("splitMode",modes[mode.getSelectedItemPosition()]).put("bypassApps",new JSONArray(chosen.get("bypass"))).put("onlyApps",new JSONArray(chosen.get("only"))).put("directDomains",domainLines(direct.getText().toString())).put("proxyDomains",domainLines(proxy.getText().toString())));dialog.dismiss();toast(app.routingRestartPending()?"Saved. App routing applies after you stop and start VPN.":"Routing settings saved");}catch(Exception invalid){toast(invalid.getMessage());}}));dialog.show();return dialog;
+    }
+    private EditText domainField(JSONArray values){EditText field=new EditText(this);field.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE);field.setMinLines(2);field.setText(String.join("\n",ProductSettings.strings(values)));field.setHint("example.com");return field;}
+    private static JSONArray domainLines(String input){JSONArray result=new JSONArray();for(String line:input.split("[\\r\\n]+"))if(!line.trim().isEmpty())result.put(line.trim());return result;}
+    private void diagnostics(){reportDialog("Diagnostics",app.diagnostics());}
+    private void reportDialog(String title,String report){TextView text=text(report,12,INK);text.setTextIsSelectable(true);text.setPadding(dp(18),dp(8),dp(18),dp(8));ScrollView scroll=new ScrollView(this);scroll.addView(text);new AlertDialog.Builder(this).setTitle(title).setView(scroll).setPositiveButton("Copy",(d,w)->{((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Autopilot "+title,report));toast("Copied "+title.toLowerCase(Locale.ROOT));}).setNeutralButton("Share",(d,w)->{Intent share=new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT,"Autopilot "+title).putExtra(Intent.EXTRA_TEXT,report);startActivity(Intent.createChooser(share,"Share "+title.toLowerCase(Locale.ROOT)));}).setNegativeButton("Close",null).show();}
     private void about(){String license="Autopilot Android "+BuildConfig.VERSION_NAME+"\n\nMihomo v1.19.32 · libmihomo-android v0.3.11\nGPL-3.0. Android source and build instructions are included with this APK release.\n\nSnakeYAML: Apache-2.0. Kotlin: Apache-2.0.\n\n";for(String file:List.of("COPYING","APACHE-2.0.txt")){try(InputStream in=getAssets().open(file)){license+=readText(in,100000)+"\n\n";}catch(IOException ignored){}}TextView text=text(license,12,INK);text.setPadding(dp(18),0,dp(18),0);ScrollView scroll=new ScrollView(this);scroll.addView(text);new AlertDialog.Builder(this).setTitle("About & licenses").setView(scroll).setPositiveButton("Close",null).show();}
     private static String readText(InputStream input,int limit)throws IOException{
         if(input==null)throw new IOException("Could not open configuration");

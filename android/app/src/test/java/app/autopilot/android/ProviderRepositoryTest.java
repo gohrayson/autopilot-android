@@ -19,6 +19,17 @@ import static org.junit.Assert.*;
 
 /** Fixture transport only: never touches a Windows account, external API, proxy or VPN. */
 public class ProviderRepositoryTest {
+    @Test public void importedSourceMetadataAndRemovalRemainDurableWithoutLosingProviderAccount()throws Exception{
+        Fixture f=new Fixture();f.one();f.repo.importConfig(proxy("Singapore portable fixture"));
+        JSONObject status=f.repo.status("import");assertEquals(1,status.getInt("nodeCount"));assertEquals(f.time.now,status.getLong("lastRefresh"));assertEquals("ready",status.getString("phase"));
+        f.repo.logout("import");assertEquals(0,f.repo.status("import").getInt("nodeCount"));assertEquals(0,f.repo.status("import").getLong("lastRefresh"));
+        ProviderRepository restored=new ProviderRepository(f.store,f.http,f.time,f.time::advance);assertEquals(0,restored.status("import").getInt("nodeCount"));assertEquals(1,restored.status("onevpn").getInt("nodeCount"));assertTrue(restored.status("onevpn").getBoolean("connected"));
+    }
+    @Test public void paidExpiryAndRefreshMetadataArePublishedWithoutAdditionalAccountCalls()throws Exception{
+        Fixture f=new Fixture();f.one();int calls=f.http.oneCalls;
+        JSONObject status=f.repo.status("onevpn");assertTrue(status.getBoolean("paid"));assertEquals(f.time.now+86400000,status.getLong("subscriptionEnd"));assertEquals(f.time.now,status.getLong("lastRefresh"));
+        status.put("paid",false);assertTrue(f.repo.status("onevpn").getBoolean("paid"));assertEquals(calls,f.http.oneCalls);
+    }
     private static final String KEY = Base64.getEncoder().encodeToString(new byte[32]);
     private static String wg() { return "[Interface]\nPrivateKey=" + KEY + "\nAddress=10.0.0.2/32,fd00::2/128\nDNS=1.1.1.1\nMTU=1280\n[Peer]\nPublicKey=" + KEY + "\nEndpoint=example.test:51820\nAllowedIPs=0.0.0.0/0,::/0\nPersistentKeepalive=25\n"; }
     private static String proxy(String label) { return "proxies:\n  - name: \"" + label + "\"\n    type: vless\n    server: fixture.invalid\n    port: 443\n    uuid: fixture\n"; }

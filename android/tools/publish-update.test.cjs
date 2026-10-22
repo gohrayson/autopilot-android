@@ -43,6 +43,32 @@ function fixture() {
   return prepared;
 }
 
+function versionInfo(key, value) {
+  const name = Buffer.from(`${key}\0`, 'utf16le'), text = Buffer.from(`${value}\0`, 'utf16le');
+  const valueAt = Math.ceil((6 + name.length) / 4) * 4, size = Math.ceil((valueAt + text.length) / 4) * 4;
+  const result = Buffer.alloc(size); result.writeUInt16LE(size); result.writeUInt16LE(value.length + 1, 2); result.writeUInt16LE(1, 4);
+  name.copy(result, 6); text.copy(result, valueAt); return result;
+}
+function windowsExe(version = '0.4.0', product = 'Autopilot') {
+  const header = Buffer.alloc(128); header.write('MZ'); header.writeUInt32LE(64, 0x3c); header.writeUInt32LE(0x4550, 64); Buffer.from('efbeadde4e756c6c736f6674496e7374', 'hex').copy(header, 96);
+  return Buffer.concat([header, versionInfo('ProductName', product), versionInfo('FileVersion', version), versionInfo('ProductVersion', version)]);
+}
+function unifiedFixture({ desktopVersion = '0.4.0', exeVersion = '0.4.0', contractVersion = '0.4.0', desktopContractVersion = contractVersion } = {}) {
+  const gradle = GRADLE.replace('0.1.2', '0.4.0').replace('versionCode 3', 'versionCode 10');
+  const geo = Buffer.alloc(4 * 1024 * 1024 + 7, 37), geoName = 'android/app/src/main/assets/geoip.metadb', geoManifest = 'android/app/src/main/assets/geoip-manifest.json';
+  const contract = Buffer.from(JSON.stringify({ schemaVersion: 1, productVersion: contractVersion, androidVersionCode: 10 }));
+  const source = [[SOURCES[0][0], gradle], SOURCES[1], [geoName, geo], [geoManifest, JSON.stringify({ name: 'geoip.metadb', size: geo.length, sha256: HASH(geo) })], ['android/app/src/main/assets/product-contract.json', contract]];
+  const desktop = { version: desktopVersion, productName: 'Autopilot', build: { appId: 'local.autopilot.proxy', productName: 'Autopilot', win: { target: ['portable', 'nsis'] } } };
+  const files = new Map(source.map(([name, content]) => [path.join(ROOT, ...name.split('/')), Buffer.from(content)]));
+  files.set(path.join(ROOT, 'package.json'), Buffer.from(JSON.stringify(desktop)));
+  files.set(path.join(ROOT, 'src/shared/product-contract.json'), Buffer.from(JSON.stringify({ schemaVersion: 1, productVersion: desktopContractVersion, androidVersionCode: 10 })));
+  files.set(path.join(ROOT, 'dist/android/Autopilot-Android-0.4.0.apk'), Buffer.from('signed unified APK fixture bytes'));
+  files.set(path.join(ROOT, 'dist/android/Autopilot-Android-0.4.0-source.zip'), zip(source));
+  files.set(path.join(ROOT, 'dist/Autopilot-0.4.0-setup.exe'), windowsExe(exeVersion));files.set(path.join(ROOT, 'dist/Autopilot-0.4.0-portable.exe'), windowsExe(exeVersion));
+  const read = (name, encoding) => { const bytes = files.get(name); if (!bytes) throw new Error(`not found fixture ${name}`); return encoding ? bytes.toString(encoding) : bytes; };
+  return { files, read, source, version: publisher.parseVersion(gradle), prepare: () => publisher.prepareRelease({ root: ROOT, read, now: new Date('2026-10-23T00:00:00Z'), notes: 'Unify desktop and Android functionality.', verifyApk() {} }) };
+}
+
 function fakeApi(prepared, { existingPublic = false, draftExisting = false, mismatch = false, badUploadOrigin = false, duplicate = false } = {}) {
   const calls = [];
   let release = (draftExisting || existingPublic) ? makeRelease(!existingPublic) : null;
@@ -169,4 +195,48 @@ test('hash mismatch, foreign upload origin and duplicate draft assets block publ
     await assert.rejects(publisher.publishRelease(prepared, fake.api, { publish: true }));
     assert.equal(fake.calls.some(call => call[0] === 'PATCH'), false);
   }
+});
+
+test('unified release keeps Android schema and adds verified setup/portable/windows manifest with full checksums', () => {
+  const prepared = unifiedFixture().prepare();
+  assert.equal(prepared.tag, 'android-v0.4.0');assert.deepEqual(Object.keys(prepared.manifest), ['schemaVersion', 'packageName', 'versionName', 'versionCode', 'minSdk', 'apkUrl', 'sha256', 'sizeBytes', 'notes', 'publishedAt']);
+  assert.deepEqual(prepared.assets.map(asset => asset.name), ['Autopilot-Android-0.4.0.apk', 'latest.json', 'Autopilot-Android-0.4.0-source.zip', 'Autopilot-0.4.0-setup.exe', 'Autopilot-0.4.0-portable.exe', 'windows-latest.json', 'SHA256SUMS']);
+  assert.deepEqual(Object.keys(prepared.windowsManifest).sort(), ['schemaVersion','packageName','arch','versionName','installerUrl','sha256','sizeBytes','notes','publishedAt'].sort());
+  assert.equal(prepared.windowsManifest.packageName, 'local.autopilot.proxy');assert.equal(prepared.windowsManifest.arch, 'x64');
+  const installer = prepared.assets.find(asset => asset.name.endsWith('-setup.exe'));
+  assert.equal(prepared.windowsManifest.sha256, HASH(installer.bytes));assert.equal(prepared.windowsManifest.sizeBytes, installer.bytes.length);
+  assert.equal(prepared.windowsManifest.installerUrl, 'https://github.com/gohrayson/autopilot-android/releases/download/android-v0.4.0/Autopilot-0.4.0-setup.exe');
+  assert.deepEqual(JSON.parse(prepared.assets.find(asset => asset.name === 'windows-latest.json').bytes), prepared.windowsManifest);
+  assert.equal(prepared.assets.at(-1).bytes.toString(), prepared.assets.slice(0,-1).map(asset => `${HASH(asset.bytes)}  ${asset.name}\n`).join(''));
+});
+test('unified version mismatch and stale Windows product identity stop preparation before publication', () => {
+  for (const options of [{ desktopVersion:'0.3.3' },{exeVersion:'0.3.3'},{contractVersion:'0.3.3'},{desktopContractVersion:'0.3.3'}]) assert.throws(() => unifiedFixture(options).prepare(), /match|differs/);
+  const f=unifiedFixture();f.files.set(path.join(ROOT,'dist/Autopilot-0.4.0-setup.exe'),windowsExe('0.4.0','Other product'));assert.throws(f.prepare,/identity/);
+  const missing=unifiedFixture();missing.files.delete(path.join(ROOT,'dist/Autopilot-0.4.0-portable.exe'));assert.throws(missing.prepare,/not found/);
+});
+test('Windows identity checks require an actual PE/NSIS header and unambiguous resource version', () => {
+  assert.deepEqual(publisher.verifyWindowsExecutable(windowsExe(),'0.4.0','setup'),{sha256:HASH(windowsExe()),sizeBytes:windowsExe().length});
+  for (const mutate of [bytes=>bytes.fill(0,0,2),bytes=>bytes.writeUInt32LE(0xffffffff,0x3c),bytes=>bytes.writeUInt32LE(0,64),bytes=>bytes.fill(0,96,112)]) {const bytes=windowsExe();mutate(bytes);assert.throws(()=>publisher.verifyWindowsExecutable(bytes,'0.4.0','setup'),/header|PE\/NSIS/);}
+  assert.throws(()=>publisher.verifyWindowsExecutable(Buffer.concat([windowsExe(),versionInfo('ProductName','Autopilot')]),'0.4.0','setup'),/ambiguous/);
+  assert.throws(()=>publisher.verifyWindowsExecutable(windowsExe(),'0.4.1','portable'),/identity/);
+});
+test('Windows update manifest is exact and hashes the installer under the same immutable tag', () => {
+  const m=unifiedFixture().prepare().windowsManifest;publisher.validateWindowsManifest(m);
+  for (const patch of [{token:'secret'},{arch:'arm64'},{packageName:'other'},{versionName:'0.4.1'},{installerUrl:m.installerUrl.replace('android-v0.4.0','other-tag')},{sha256:'0'},{sizeBytes:0},{notes:'\u202eunsafe'},{publishedAt:'not a date'}]) assert.throws(()=>publisher.validateWindowsManifest({...m,...patch}));
+});
+test('only exact pinned GeoIP entry may exceed ordinary source limit and it must match manifest/hash/local bytes', () => {
+  const f=unifiedFixture(),readLocal=name=>f.read(path.join(ROOT,...name.split('/')));
+  assert.equal(publisher.verifySourceZip(zip(f.source),f.version,readLocal),f.source.length);
+  for(const name of ['android/app/src/main/assets/other.metadb','android/app/src/main/assets/GEOIP.metadb']) assert.throws(()=>publisher.verifySourceZip(zip([...f.source,[name,Buffer.alloc(4*1024*1024+1)]]),f.version,readLocal),/Unsafe|casing/);
+  const bad=f.source.map(([name,bytes])=>name.endsWith('geoip-manifest.json')?[name,JSON.stringify({name:'geoip.metadb',size:4*1024*1024+7,sha256:'0'.repeat(64)})]:[name,bytes]);
+  assert.throws(()=>publisher.verifySourceZip(zip(bad),f.version,name=>Buffer.from(new Map(bad).get(name))),/pinned manifest/);
+  const oversize=f.source.map(([name,bytes])=>name.endsWith('/geoip.metadb')?[name,Buffer.alloc(12*1024*1024+1)]:[name,bytes]);assert.throws(()=>publisher.verifySourceZip(zip(oversize),f.version,readLocal),/Unsafe/);
+  assert.throws(()=>publisher.verifySourceZip(zip(f.source.filter(([name])=>!name.endsWith('geoip-manifest.json'))),f.version,readLocal),/must include/);
+});
+test('unified draft uploads all assets once and publication remains immutable with verified remote digests',async()=>{
+  const prepared=unifiedFixture().prepare(),draft=fakeApi(prepared);const result=await publisher.publishRelease(prepared,draft.api);
+  assert.equal(result.published,false);assert.equal(result.windowsUpdateUrl,'https://github.com/gohrayson/autopilot-android/releases/latest/download/windows-latest.json');assert.equal(draft.calls.filter(call=>call[0]==='UPLOAD').length,7);assert.equal(draft.calls.some(call=>call[0]==='PATCH'),false);
+  const resumed=fakeApi(prepared,{draftExisting:true});await publisher.publishRelease(prepared,resumed.api,{publish:true});assert.equal(resumed.calls.some(call=>call[0]==='UPLOAD'||call[0]==='POST'),false);assert.equal(resumed.calls.at(-1)[0],'PATCH');
+  const publicRelease=fakeApi(prepared,{existingPublic:true});await assert.rejects(publisher.publishRelease(prepared,publicRelease.api,{publish:true}),/overwrite/);assert.equal(publicRelease.calls.length,1);
+  const mismatched=fakeApi(prepared,{draftExisting:true,mismatch:true});await assert.rejects(publisher.publishRelease(prepared,mismatched.api,{publish:true}),/differs/);assert.equal(mismatched.calls.some(call=>call[0]==='PATCH'),false);
 });

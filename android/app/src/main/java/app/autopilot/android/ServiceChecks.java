@@ -21,9 +21,11 @@ public final class ServiceChecks implements AutoCloseable {
         Result(String a,String b,String c){claude=a;chatgpt=b;gemini=c;}
         public boolean usable(){return SelectionPolicy.usable(claude)&&SelectionPolicy.usable(chatgpt)&&SelectionPolicy.usable(gemini);}
     }
-    public Result check(int port) throws InterruptedException {
+    public Result check(int port) throws InterruptedException {return check(port,List.of("claude","chatgpt","gemini"));}
+    public Result check(int port,List<String> required) throws InterruptedException {
         if(closed || Thread.currentThread().isInterrupted())throw new InterruptedException();
-        List<Callable<String>> tasks=List.of(()->fetch(port,"https://claude.ai/","claude"),()->fetch(port,"https://api.openai.com/compliance/cookie_requirements","chatgpt"),()->fetch(port,"https://gemini.google.com/","gemini"));
+        List<String> services=List.of("claude","chatgpt","gemini");
+        List<Callable<String>> tasks=new ArrayList<>();for(String service:services)tasks.add(()->required.contains(service)?fetch(port,"claude".equals(service)?"https://claude.ai/":"chatgpt".equals(service)?"https://api.openai.com/compliance/cookie_requirements":"https://gemini.google.com/",service):"not-required");
         try {
             List<Future<String>> futures=pool.invokeAll(tasks,14,TimeUnit.SECONDS);
             String[] values={"error","error","error"};

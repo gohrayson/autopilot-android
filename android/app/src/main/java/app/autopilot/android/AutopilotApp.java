@@ -22,11 +22,25 @@ public final class AutopilotApp extends Application {
     private volatile JSONObject lastCoreDiagnostic;
     private volatile JSONObject currentCoreDiagnostic;
     private SharedPreferences prefs;
+    private volatile JSONObject productSettings;
+    private volatile String appliedRouting;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
     private final ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor();
     @Override public void onCreate() {
-        super.onCreate(); prefs = getSharedPreferences("preferences", MODE_PRIVATE);
+        super.onCreate();
+        try(InputStream contract=getAssets().open("product-contract.json")){ProductContract.install(contract);}catch(Exception invalid){throw new IllegalStateException("Product contract is unavailable",invalid);}
+        prefs = getSharedPreferences("preferences", MODE_PRIVATE);
+        GeoRouting.ensure(this);
+        try{
+            JSONObject saved=new JSONObject(prefs.getString("productSettings","{}"));
+            if(!prefs.contains("productSettings")){
+                saved.put("preferredRegions",new JSONArray(prefs.getString("preferred","[]")));
+                Set<String> legacy=prefs.getStringSet("bypass",Set.of());
+                if(!legacy.isEmpty())saved.put("splitMode","bypass").put("bypassApps",new JSONArray(legacy));
+            }
+            productSettings=ProductSettings.merge(null,saved);
+        }catch(Exception invalid){productSettings=ProductSettings.merge(null,new JSONObject());log("settings","SAVED_SETTINGS_REJECTED");}
         try{String saved=prefs.getString("coreDiagnostic","");if(saved.length()<=8192&&!saved.isEmpty())lastCoreDiagnostic=CoreDiagnostics.restore(new JSONObject(saved));}catch(Exception ignored){}
         providers = new ProviderRepository(this);
         updates = new UpdateManager(this);
@@ -43,20 +57,26 @@ public final class AutopilotApp extends Application {
         }, 30, 30, TimeUnit.SECONDS);
     }
     public List<String> preferred() {
-        ArrayList<String> result = new ArrayList<>();
-        try { JSONArray a=new JSONArray(prefs.getString("preferred", "[]")); for(int i=0;i<a.length();i++)result.add(a.getString(i)); } catch(JSONException ignored){}
-        return result;
+        return new ArrayList<>(ProductSettings.strings(settings().optJSONArray("preferredRegions")));
     }
     public void setPreferred(List<String> regions) {
-        if(regions.size()>32 || regions.stream().anyMatch(c-> !c.matches("[A-Z]{2}") || Set.of("CN","HK","MO").contains(c))) throw new IllegalArgumentException("Invalid countries");
-        prefs.edit().putString("preferred",new JSONArray(new LinkedHashSet<>(regions)).toString()).apply();
-        VpnEngine e=engine; if(e!=null)e.preferencesChanged(); changed();
+        try{setSettings(new JSONObject().put("preferredRegions",new JSONArray(new LinkedHashSet<>(regions))));}catch(JSONException invalid){throw new IllegalArgumentException(invalid);}
         providerExecutor.execute(() -> { try { providers.refreshDue(preferred()); } catch(Exception ex){log("provider","REFRESH_FAILED");} });
     }
-    public Set<String> bypassPackages(){return new HashSet<>(prefs.getStringSet("bypass",Set.of()));}
+    public synchronized JSONObject settings(){try{return new JSONObject(productSettings.toString());}catch(JSONException impossible){throw new IllegalStateException(impossible);}}
+    public synchronized void setSettings(JSONObject patch){
+        JSONObject next=ProductSettings.merge(productSettings,patch);
+        if(next.toString().equals(productSettings.toString()))return;
+        if(!prefs.edit().putString("productSettings",next.toString()).commit())throw new IllegalStateException("Android could not save settings");
+        productSettings=next;log("settings","SETTINGS_UPDATED");VpnEngine current=engine;if(current!=null)current.settingsChanged();changed();
+    }
+    public Set<String> bypassPackages(){return ProductSettings.strings(settings().optJSONArray("bypassApps"));}
+    public boolean routingRestartPending(){return engine!=null&&appliedRouting!=null&&!appliedRouting.equals(ProductSettings.routingIdentity(settings()));}
+    void routingApplied(JSONObject value){appliedRouting=ProductSettings.routingIdentity(value);changed();}
+    void routingReleased(){appliedRouting=null;changed();}
     public boolean vpnWanted(){return prefs.getBoolean("vpnWanted",false);}
     public void setVpnWanted(boolean wanted){prefs.edit().putBoolean("vpnWanted",wanted).apply();}
-    public void setBypassPackages(Set<String> packages){ prefs.edit().putStringSet("bypass",new HashSet<>(packages)).apply(); changed(); }
+    public void setBypassPackages(Set<String> packages){try{setSettings(new JSONObject().put("bypassApps",new JSONArray(packages)).put("splitMode",packages.isEmpty()?"off":"bypass"));}catch(JSONException impossible){throw new IllegalArgumentException(impossible);}}
     public void publish(JSONObject state){snapshot=state;providers.currentNodeName=state.optString("current","");changed();}
     public void requestRecovery(List<String> names){
         List<String> copy=new ArrayList<>(names);
@@ -97,6 +117,11 @@ public final class AutopilotApp extends Application {
     public String diagnostics(){
         StringBuilder out=new StringBuilder("Autopilot Android "+BuildConfig.VERSION_NAME+"\nAndroid "+android.os.Build.VERSION.RELEASE+" / "+android.os.Build.SUPPORTED_ABIS[0]+"\n");
         JSONObject s=state(); out.append("VPN: ").append(s.optString("phase","idle")).append("\n");
+        JSONObject settings=settings();out.append("Auto paused: ").append(settings.optBoolean("paused")).append("\nGlobal mode: ").append(settings.optBoolean("globalMode"))
+            .append("\nSplit mode: ").append(settings.optString("splitMode")).append("\nApp routing restart pending: ").append(routingRestartPending()).append("\n");
+        out.append("Required services: ").append(settings.optJSONArray("required")).append("\nSelection intervals: tick=").append(settings.optLong("tickMs")).append(" sweep=").append(settings.optLong("sweepMs")).append(" verify=").append(settings.optLong("verifyMs"))
+            .append("\nSelection thresholds: maxLatency=").append(settings.optLong("maxLatencyMs")).append(" failures=").append(settings.optInt("failLimit")).append(" switchRatio=").append(settings.optDouble("switchRatio")).append(" dwell=").append(settings.optLong("minDwellMs")).append(" topK=").append(settings.optInt("checkTopK"))
+            .append("\nRegional database verified: ").append(AndroidRouting.geoAvailable(this)).append("\n");
         out.append("VPN error: ").append(s.optString("error","")).append("\nBaseline accepted: ").append(s.optBoolean("coreBaselineAccepted"))
             .append("\nProfile accepted: ").append(s.optBoolean("coreProfileAccepted")).append("\nSkipped nodes: ").append(s.optInt("skippedCount")).append("\n");
         JSONObject core=coreDiagnostic();out.append("Current core diagnostic: ").append(core==null?"none":core.toString()).append("\n");
@@ -110,7 +135,7 @@ public final class AutopilotApp extends Application {
         JSONObject watchdog=s.optJSONObject("watchdog");if(watchdog!=null)out.append("Active HTTPS watchdog: ").append(watchdog).append("\n");
         if(updates!=null)out.append(updates.diagnostic());
         JSONArray skipped=s.optJSONArray("skippedNodes");if(skipped!=null&&skipped.length()>0)out.append("Skipped diagnostics: ").append(skipped).append("\n");
-        for(String p:List.of("onevpn","octohide")){
+        for(String p:List.of("onevpn","octohide","import")){
             JSONObject a=providers.status(p);out.append(p).append(": ").append(a.optString("phase")).append(" / ").append(a.optString("code")).append(" / ").append(a.optInt("nodeCount")).append(" nodes\n");
             out.append("Retry: ").append(a.optLong("retryAt")).append("\n");
             JSONObject last=a.optJSONObject("lastDiagnostic");
@@ -118,5 +143,12 @@ public final class AutopilotApp extends Application {
         }
         try { File f=new File(getFilesDir(),"diagnostics.log"); if(f.exists()) {byte[] b=java.nio.file.Files.readAllBytes(f.toPath());String text=new String(b,StandardCharsets.UTF_8);out.append(text.substring(Math.max(0,text.length()-48000)));} }catch(IOException ignored){}
         return out.toString();
+    }
+    public String events(){
+        StringBuilder out=new StringBuilder();
+        for(String name:List.of("diagnostics.previous.log","diagnostics.log"))try{
+            File file=new File(getFilesDir(),name);if(file.isFile()){String text=new String(java.nio.file.Files.readAllBytes(file.toPath()),StandardCharsets.UTF_8);out.append(text.substring(Math.max(0,text.length()-48000)));}
+        }catch(IOException ignored){}
+        return out.length()==0?"No events recorded.":out.toString();
     }
 }

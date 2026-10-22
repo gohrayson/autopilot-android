@@ -1,0 +1,338 @@
+{
+  "schemaVersion": 1,
+  "productVersion": "0.4.0",
+  "androidVersionCode": 10,
+  "services": [
+    "claude",
+    "chatgpt",
+    "gemini"
+  ],
+  "settings": {
+    "required": {
+      "type": "array",
+      "items": "service",
+      "minItems": 1,
+      "maxItems": 3,
+      "default": [
+        "claude",
+        "chatgpt",
+        "gemini"
+      ]
+    },
+    "tickMs": {
+      "type": "integer",
+      "min": 1000,
+      "max": 600000,
+      "default": 15000
+    },
+    "sweepMs": {
+      "type": "integer",
+      "min": 10000,
+      "max": 86400000,
+      "default": 60000
+    },
+    "verifyMs": {
+      "type": "integer",
+      "min": 15000,
+      "max": 86400000,
+      "default": 300000
+    },
+    "maxLatencyMs": {
+      "type": "integer",
+      "min": 100,
+      "max": 60000,
+      "default": 3000
+    },
+    "failLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 10,
+      "default": 2
+    },
+    "switchRatio": {
+      "type": "number",
+      "min": 0.1,
+      "max": 1,
+      "default": 0.9
+    },
+    "minDwellMs": {
+      "type": "integer",
+      "min": 0,
+      "max": 3600000,
+      "default": 30000
+    },
+    "checkTopK": {
+      "type": "integer",
+      "min": 1,
+      "max": 100,
+      "default": 8
+    },
+    "preferredRegions": {
+      "type": "array",
+      "items": "country",
+      "minItems": 0,
+      "maxItems": 32,
+      "default": []
+    },
+    "paused": {
+      "type": "boolean",
+      "default": false
+    },
+    "globalMode": {
+      "type": "boolean",
+      "default": false
+    },
+    "splitMode": {
+      "type": "string",
+      "enum": [
+        "off",
+        "bypass",
+        "only"
+      ],
+      "default": "off"
+    },
+    "bypassApps": {
+      "type": "array",
+      "items": "app",
+      "minItems": 0,
+      "maxItems": 200,
+      "default": []
+    },
+    "onlyApps": {
+      "type": "array",
+      "items": "app",
+      "minItems": 0,
+      "maxItems": 200,
+      "default": []
+    },
+    "directDomains": {
+      "type": "array",
+      "items": "domain",
+      "minItems": 0,
+      "maxItems": 500,
+      "default": []
+    },
+    "proxyDomains": {
+      "type": "array",
+      "items": "domain",
+      "minItems": 0,
+      "maxItems": 500,
+      "default": []
+    }
+  },
+  "policy": {
+    "latencyTtlMs": 90000,
+    "serviceTtlMs": 300000,
+    "sampleHorizonMs": 180000,
+    "sampleCount": 5,
+    "jitterWeight": 0.5,
+    "failurePenaltyMs": 750,
+    "challengePenaltyMs": 300,
+    "minImprovementPoints": 20,
+    "forcedSweepPasses": 3,
+    "latencyRetryCount": 1,
+    "watchdogIntervalMs": 15000,
+    "watchdogConfirmMs": 4000,
+    "watchdogRoundMs": 7000,
+    "broadFailureOriginCount": 2,
+    "requireOverlappingOrigins": true,
+    "nativeBurstCount": 3,
+    "nativeBurstWindowMs": 10000,
+    "nativeBurstMinGapMs": 5000,
+    "nativeBurstDelayMs": 250,
+    "cooldownBaseMs": 60000,
+    "cooldownMaxMs": 300000,
+    "cooldownResetHealthyMs": 120000,
+    "transportRetentionMs": 45000,
+    "recoveryCandidateLimit": 4,
+    "comparativeCandidateLimit": 2,
+    "recoveryBudgetMs": 60000,
+    "recoveryBackoffMs": [
+      30000,
+      60000,
+      120000,
+      300000
+    ],
+    "noReplacement": "reject",
+    "excludedCountries": [
+      "CN",
+      "HK",
+      "MO"
+    ],
+    "watchdogOrigins": [
+      {
+        "id": "google",
+        "url": "https://www.gstatic.com/generate_204"
+      },
+      {
+        "id": "openai",
+        "url": "https://api.openai.com/compliance/cookie_requirements"
+      },
+      {
+        "id": "anthropic",
+        "url": "https://api.anthropic.com/"
+      }
+    ],
+    "forceDomains": [
+      "claude.ai",
+      "claude.com",
+      "anthropic.com",
+      "claudeusercontent.com",
+      "openai.com",
+      "chatgpt.com",
+      "oaistatic.com",
+      "oaiusercontent.com",
+      "chat.com",
+      "sora.com",
+      "google.com",
+      "googleapis.com",
+      "googleusercontent.com",
+      "gstatic.com",
+      "gemini.google.com",
+      "aistudio.google.com",
+      "challenges.cloudflare.com"
+    ],
+    "updateMaxConnections": 4,
+    "updateRequestTimeoutMs": 20000,
+    "updateTransferDeadlineMs": 600000,
+    "updateAttempts": 3,
+    "updateManifestDeadlineMs": 30000,
+    "updateParallelMinBytes": 4194304,
+    "updateRetryBaseMs": 200
+  },
+  "capabilities": [
+    {
+      "id": "automatic_selection",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "switch_once",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "pin_node",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "pause_auto",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "country_priority",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "required_services",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "selection_settings",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "global_mode",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "split_apps",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "split_domains",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "provider_accounts",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "configuration_import",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "import_removal",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "events",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "diagnostic_copy",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "diagnostic_export",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "portable_preferences",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "app_updates",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "resumable_download",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    }
+  ]
+}

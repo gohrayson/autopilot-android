@@ -30,21 +30,21 @@ public class SelectionPolicyTest {
         assertFalse(SelectionPolicy.shouldSwitch(current,candidate,List.of(),NOW,NOW-10_000,false));
         assertTrue(SelectionPolicy.shouldSwitch(current,candidate,List.of(),NOW,NOW-31_000,false));
         candidate=node("b","JP",85);
-        assertFalse(SelectionPolicy.shouldSwitch(current,candidate,List.of(),NOW,NOW-31_000,true));
+        assertTrue(SelectionPolicy.shouldSwitch(current,candidate,List.of(),NOW,NOW-31_000,true));
         current=node("a","JP",1000);candidate=node("b","JP",950);
         assertFalse(SelectionPolicy.shouldSwitch(current,candidate,List.of(),NOW,NOW-31_000,false));
     }
     @Test public void priorityOverrideAndFailureRecoveryIgnoreDwell(){
         var current=node("sg","SG",40);var my=node("my","MY",300);
         assertTrue(SelectionPolicy.shouldSwitch(current,my,List.of("MY","SG"),NOW,NOW,false));
-        assertFalse(SelectionPolicy.shouldSwitch(my,current,List.of("MY","SG"),NOW,NOW-31_000,true));
+        assertTrue(SelectionPolicy.shouldSwitch(my,current,List.of("MY","SG"),NOW,NOW-31_000,true));
         current.claude="blocked";assertTrue(SelectionPolicy.shouldSwitch(current,my,List.of(),NOW,NOW,false));
         assertFalse(SelectionPolicy.shouldSwitch(my,my,List.of(),NOW,NOW-31_000,true));
     }
     @Test public void stabilityAndChallengesAffectRanking(){
-        var stable=node("a","JP",100);var jittery=node("b","JP",90);jittery.latency(600,NOW);jittery.latency(90,NOW);
+        var stable=node("a","JP",100);var jittery=node("b","JP",90);jittery.latency(600,NOW);jittery.latency(300,NOW);
         assertTrue(stable.score()<jittery.score());
-        stable.chatgpt="challenged";assertEquals(200,stable.score());
+        stable.chatgpt="challenged";assertEquals(400,stable.score());
         stable.latency(-1,NOW);assertEquals(Integer.MAX_VALUE,stable.score());
         stable.latency(100,NOW);assertTrue(stable.qualified(NOW));
     }
@@ -69,5 +69,12 @@ public class SelectionPolicyTest {
         assertFalse(h.qualified(later));assertFalse(h.eligibleForProof(later));assertTrue(h.retainSelectedTransport(later));
         h.servicesAt=later;h.chatgpt="unknown";assertFalse(h.qualified(later));assertTrue(h.retainSelectedTransport(later));
         assertFalse(h.retainSelectedTransport(later+45_001));h.applicationFailed(later);assertFalse(h.retainSelectedTransport(later));
+    }
+    @Test public void candidateProofRetainsEscalationUntilSelectedHealthIsSustained(){
+        var h=node("a","JP",100);h.applicationFailed(NOW);h.applicationVerified(NOW+60_001);assertEquals(1,h.appFailures);
+        for(long at=NOW+60_001;at<=NOW+165_001;at+=15_000)h.selectedHealthy(at);
+        assertEquals(1,h.appFailures);h.selectedUncertain();h.selectedHealthy(NOW+180_001);assertEquals(1,h.appFailures);
+        for(long at=NOW+195_001;at<=NOW+300_001;at+=15_000)h.selectedHealthy(at);assertEquals(0,h.appFailures);
+        h.applicationFailed(NOW+300_002);assertEquals(NOW+360_002,h.appFailureUntil);
     }
 }

@@ -23,7 +23,7 @@ public class EngineConfigurationTest {
     }
     @Test public void noVerifiedSelectionFallsClosedAndDoesNotRequireGeodata()throws Exception{
         JSONObject config=VpnEngine.configuration(List.of(),new HashMap<>());
-        assertEquals("[\"MATCH,AUTOPILOT\"]",config.getJSONArray("rules").toString());
+        JSONArray rules=config.getJSONArray("rules");assertEquals("MATCH,AUTOPILOT",rules.getString(rules.length()-1));assertTrue(rules.toString().contains("DOMAIN-SUFFIX,claude.ai,AUTOPILOT"));assertFalse(rules.toString().contains("GEOIP,"));
         JSONArray names=config.getJSONArray("proxy-groups").getJSONObject(0).getJSONArray("proxies");
         assertEquals("[\"REJECT\"]",names.toString());assertFalse(config.has("external-controller"));
         assertFalse(config.has("geo-auto-update"));
@@ -35,5 +35,17 @@ public class EngineConfigurationTest {
             JSONArray resolvers=dns.getJSONArray(key);assertTrue(resolvers.length()>0);
             for(int i=0;i<resolvers.length();i++){String resolver=resolvers.getString(i);assertTrue(resolver.startsWith("https://"));assertFalse(resolver.contains("#AUTOPILOT"));}
         }
+    }
+    @Test public void settingsCallbackReloadsWebsiteAndGlobalRulesButPreservesApplicationInterface()throws Exception{
+        JSONObject settings=ProductContract.defaults();String installed=VpnEngine.configuration(List.of(),new HashMap<>(),CoreDnsConfig.DEFAULT,settings,false).getJSONArray("rules").toString();
+        java.util.concurrent.atomic.AtomicInteger rebuilds=new java.util.concurrent.atomic.AtomicInteger();
+        assertFalse(VpnEngine.reconcileRoutingSettings(installed,settings,false,rebuilds::incrementAndGet));
+        settings.put("maxLatencyMs",5000).put("paused",true).put("splitMode","bypass").put("bypassApps",new JSONArray().put("app.fixture.browser"));
+        assertFalse("App filtering waits for a new Android interface; selection controls do not reload a native profile",VpnEngine.reconcileRoutingSettings(installed,settings,false,rebuilds::incrementAndGet));
+        settings.put("directDomains",new JSONArray().put("example.com"));assertTrue(VpnEngine.reconcileRoutingSettings(installed,settings,false,rebuilds::incrementAndGet));
+        JSONObject websiteProfile=VpnEngine.configuration(List.of(),new HashMap<>(),CoreDnsConfig.DEFAULT,settings,false);installed=websiteProfile.getJSONArray("rules").toString();
+        assertTrue(installed.contains("DOMAIN-SUFFIX,example.com,DIRECT"));assertFalse(VpnEngine.reconcileRoutingSettings(installed,settings,false,rebuilds::incrementAndGet));
+        settings.put("globalMode",true);assertTrue(VpnEngine.reconcileRoutingSettings(installed,settings,false,rebuilds::incrementAndGet));assertEquals(2,rebuilds.get());
+        assertTrue("The callback must not clear the user's paused setting",settings.getBoolean("paused"));assertEquals("bypass",settings.getString("splitMode"));
     }
 }

@@ -108,17 +108,17 @@ The actual NodeParser imported 52 nodes from the supplied snapshot. The exact ge
 
 ## Provenance and host guard
 
-- Compiled VpnEngine: 
+- Compiled VpnEngine:
 D:\Github\onevpn-autopilot\android\app\build\intermediates\javac\debug\compileDebugJavaWithJavac\classes\app\autopilot\android\VpnEngine.class
-- Compiled VpnEngine SHA-256: 
+- Compiled VpnEngine SHA-256:
 22E2E785457BDA5F79DA19A1A3B977C88CDCCB42159049564857A0410DD0EF98
-- VpnEngine source SHA-256: 
+- VpnEngine source SHA-256:
 296FC30754874625F40835A35DDEA4633F68527F5DA3B18EA1EB4307246A0279
-- Native binary SHA-256: 
+- Native binary SHA-256:
 38A73D4298B2FC44524C4C50A666339046FA919EE94D57269921DE7F13CA1820
-- Synthetic workspace: 
+- Synthetic workspace:
 D:\Github\onevpn-autopilot\.data\android-config-parser-probe\20261021-201622-42f2565b
-- Private workspace: 
+- Private workspace:
 D:\Github\onevpn-autopilot\.data\android-config-parser-probe\20261021-201624-1ba2f8b1
 - Both runs compare registry proxy, existing mihomo process IDs, and the 127.0.0.1:7890 listener before/after. Both snapshots match.
 

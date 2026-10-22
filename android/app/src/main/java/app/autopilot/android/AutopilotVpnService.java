@@ -44,14 +44,20 @@ public final class AutopilotVpnService extends VpnService {
             .addAddress("172.19.0.1",30).addAddress("fdfe:dcba:9876::1",126)
             .addRoute("0.0.0.0",0).addRoute("::",0).addDnsServer(DNS).setBlocking(false);
         if(Build.VERSION.SDK_INT>=29)builder.setMetered(false);
-        // The core and provider HTTPS sockets must never re-enter the device-wide tunnel.
-        builder.addDisallowedApplication(getPackageName());
-        for(String pkg:app.bypassPackages())if(!pkg.equals(getPackageName())){
-            try{builder.addDisallowedApplication(pkg);}catch(PackageManager.NameNotFoundException ignored){app.log("vpn","BYPASS_APP_REMOVED");}
+        org.json.JSONObject settings=app.settings();
+        AndroidRouting.AppPlan plan=AndroidRouting.appPlan(settings,getPackageName());
+        int installed=0;
+        for(String pkg:plan.packages){
+            try{if(plan.includeOnly)builder.addAllowedApplication(pkg);else builder.addDisallowedApplication(pkg);installed++;}
+            catch(PackageManager.NameNotFoundException ignored){app.log("vpn","SPLIT_APP_REMOVED");}
         }
+        // No Android Builder mixes allow/disallow. Include-only omits our own UID;
+        // all other modes explicitly exclude it, keeping core/provider sockets outside TUN.
+        if(plan.includeOnly&&installed==0)throw new IOException("SPLIT_APPS_UNAVAILABLE");
         ParcelFileDescriptor descriptor=builder.establish();
         if(descriptor==null)throw new IOException("VPN_PERMISSION_REQUIRED");
         routeGuard=descriptor;
+        app.routingApplied(settings);
         return duplicateTunnel();
     }
     synchronized ParcelFileDescriptor duplicateTunnel() throws IOException {
@@ -62,7 +68,7 @@ public final class AutopilotVpnService extends VpnService {
     synchronized void releaseTunnel(){
         if(routeGuard==null)return;
         try{routeGuard.close();}catch(IOException ignored){app.log("vpn","ROUTE_GUARD_CLOSE_FAILED");}
-        finally{routeGuard=null;}
+        finally{routeGuard=null;app.routingReleased();}
     }
     void updateNotification(String detail){main.post(()->{if(owned!=null)getSystemService(NotificationManager.class).notify(NOTIFICATION,notification(detail));});}
     void finished(VpnEngine engine){main.post(()->{

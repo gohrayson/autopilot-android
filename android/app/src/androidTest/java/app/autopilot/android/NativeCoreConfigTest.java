@@ -30,7 +30,7 @@ public final class NativeCoreConfigTest {
             JSONObject config=VpnEngine.configuration(List.of(),new HashMap<>());
             assertEquals(0,config.getJSONArray("proxies").length());assertEquals(0,config.getJSONArray("listeners").length());
             assertEquals("[\"REJECT\"]",config.getJSONArray("proxy-groups").getJSONObject(0).getJSONArray("proxies").toString());
-            assertEquals("[\"MATCH,AUTOPILOT\"]",config.getJSONArray("rules").toString());assertFalse(config.getJSONObject("tun").getBoolean("enable"));
+            JSONArray rules=config.getJSONArray("rules");assertEquals("MATCH,AUTOPILOT",rules.getString(rules.length()-1));assertTrue(rules.toString().contains("DOMAIN-SUFFIX,claude.ai,AUTOPILOT"));assertFalse(rules.toString().contains("GEOIP,"));assertFalse(config.getJSONObject("tun").getBoolean("enable"));
             byte[] bytes=CoreConfigEncoding.encode(config);
             try(FileOutputStream stream=new FileOutputStream(profile)){stream.write(bytes);stream.getFD().sync();}
             assertTrue(profile.isFile());assertEquals(bytes.length,profile.length());assertArrayEquals(bytes,Files.readAllBytes(profile.toPath()));

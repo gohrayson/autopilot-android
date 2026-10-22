@@ -53,7 +53,7 @@ public class CoreConfigEncodingTest {
         assertEquals(password,parsed.getJSONArray("proxies").getJSONObject(0).getString("password"));
         Map<?,?> y=(Map<?,?>)yaml(encoded);Map<?,?> outbound=(Map<?,?>)((List<?>)y.get("proxies")).get(0);
         assertEquals(password,outbound.get("password"));assertEquals("ss",outbound.get("type"));
-        assertEquals("198.18.0.1/16",((Map<?,?>)y.get("dns")).get("fake-ip-range"));assertEquals(List.of("MATCH,AUTOPILOT"),y.get("rules"));
+        assertEquals("198.18.0.1/16",((Map<?,?>)y.get("dns")).get("fake-ip-range"));for(int i=0;i<parsed.getJSONArray("rules").length();i++)assertEquals(parsed.getJSONArray("rules").getString(i),((List<?>)y.get("rules")).get(i));assertTrue(((List<?>)y.get("rules")).contains("DOMAIN-SUFFIX,claude.ai,AUTOPILOT"));assertEquals("MATCH,AUTOPILOT",((List<?>)y.get("rules")).get(((List<?>)y.get("rules")).size()-1));
         assertEquals(parsed.getJSONArray("listeners").getJSONObject(0).getString("proxy"),node.name);
     }
     @Test public void encodedEmptyBaselineIsJsonAndYamlWithTheSameMeaning()throws Exception{

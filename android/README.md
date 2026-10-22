@@ -1,6 +1,10 @@
 # Autopilot for Android
 
-Native Android client for Autopilot. Requires Android 8.0 or later; includes ARM64, ARMv7 and x86_64. The Windows application is independent.
+Native Android client for Autopilot. Requires Android 8.0 or later; includes ARM64, ARMv7 and x86_64. Windows and Android share the same runtime product contract and release number from 0.4.0.
+
+Version 0.4.0 unifies health freshness/scoring, failure confirmation, replacement checks, cooldowns and explicit re-test behavior with Windows. It adds Pause Auto, editable required services and selection settings, global mode, direct/proxy website lists, app bypass/include-only, provider subscription/refresh details, imported-source removal, an Events viewer, shared diagnostics and portable preferences. Preferences transfer behavior only, without accounts or OS application lists. Both versions bundle the same pinned regional database.
+
+App routing uses Android's VpnService: excluded applications never enter the VPN, so website rules cannot recapture them. App-list changes are saved for the next VPN start and show a pending-restart notice. Website/global-mode changes apply to the running core. Android still owns VPN permission and APK installation confirmation; Windows uses its system proxy and installer.
 
 Version 0.1.8 adds independent active-node HTTPS monitoring while discovery is busy. It confirms repeated failures across fixed Google, OpenAI and Anthropic destinations, freshly verifies replacements, and applies a separate cooldown to failed application paths. A repeated single-service failure permits switching only when a fresh alternative fixes it. A Google test outage alone no longer defines a node as down. An already-selected route with recent working HTTPS evidence remains available during an isolated service outage while Autopilot checks alternatives. The status shows confirmation, recovery and overdue checks; diagnostics include fixed watchdog codes and timestamps.
 
@@ -73,7 +77,7 @@ These update rules describe the implemented source behavior. Installation throug
 
 This is a first Android release. Account sign-in must be performed on each device; Windows encrypted sessions are not transferable. Android cannot read the private login saved by the separate OneVPN app. The provider API remains authoritative for credentials, subscription and request limits. The known verified OneVPN login contract uses `appId=windows_app`; this constant is preserved rather than guessing an unverified Android app ID. Octohide uses its paid WireGuard export path, retains a small stable pool and respects persisted provider cooldowns. No Android integrity or account verification is bypassed.
 
-Automatic selection requires fresh latency and Claude, ChatGPT and Gemini availability signals. A Cloudflare challenge is usable with a score penalty. Unknown or blocked signals cannot qualify a new node. While connected, a higher preferred healthy country takes priority; healthy upgrades within a tier require dwell and measurable improvement. Node identities include the complete outbound configuration, so rotated keys invalidate previous health.
+Automatic selection requires fresh connection measurements and availability signals for the required services selected in Settings (Claude, ChatGPT and Gemini by default). A Cloudflare challenge is usable with a score penalty. Unknown or blocked signals cannot qualify a new node. While connected, a higher preferred healthy country takes priority; healthy upgrades within a tier require dwell and measurable improvement. Node identities include the complete outbound configuration, so rotated keys invalidate previous health.
 
 Android owns the TUN routes. Both IPv4 and IPv6 are routed into the VPN; native outbound sockets are protected, and the app's own provider/control sockets are excluded to avoid a routing loop. Bootstrap DNS uses protected encrypted DNS so an initially rejected selector cannot deadlock its own health checks. The selector starts at REJECT until a node qualifies.
 
