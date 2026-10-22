@@ -32,7 +32,7 @@ public final class VpnEngine {
     private volatile CompletableFuture<Boolean> tunStarted;
     private volatile List<Node> nodes=List.of();
     private Node current;
-    private String pinned="",phase="idle",error="",detail="";
+    private String pinned="",phase="idle",error="",detail="",stage="";
     private long lastSwitch;
     private boolean busy;
     private boolean preserveError;
@@ -45,11 +45,13 @@ public final class VpnEngine {
     private File home;
     public VpnEngine(AutopilotVpnService service,AutopilotApp app){this.service=service;this.app=app;}
     public void start(){if(!running.compareAndSet(false,true))return;submit(()->{
-        phase="starting";detail="Preparing VPN";publish();
+        // The first serialized job publishes its phase before any startup I/O.
+        phase="starting";busy=true;progress("preparing","Preparing connection");
         home=new File(app.getFilesDir(),"core");if(!home.isDirectory()&&!home.mkdirs())throw new IOException("CORE_STORAGE");
         Clash.INSTANCE.load(app.getApplicationInfo().nativeLibraryDir);Clash.INSTANCE.assertReady();nativeReady=true;
         // Establish that this platform can accept our global configuration independently
         // of provider nodes. No Android interface exists while these semantic gates run.
+        progress("settings","Checking VPN settings");
         nodes=List.of();syncHealth();JSONObject baselineProfile=writeConfig();
         JSONObject baselineInit=initParameters(),baselineSetup=selected("REJECT");
         String baseline=quickSetup(baselineInit,baselineSetup);
@@ -67,7 +69,7 @@ public final class VpnEngine {
         verifySelector("REJECT");
         establish(false);startedOnce=true;profileUsable=true;
         worker.scheduleWithFixedDelay(()->guard(()->tick()),15,15,TimeUnit.SECONDS);
-        if(nodes.isEmpty()){noNodes();publish();}
+        if(nodes.isEmpty()){busy=false;stage="";noNodes();publish();}
         else sweep(true);
     });}
     public void stop(){
@@ -79,16 +81,16 @@ public final class VpnEngine {
     public void select(String name,boolean pin){preemptSweep();submit(()->{
         if(!profileUsable){nodesChanged();return;}
         Node target=findByName(name);if(target==null){error="NODE_UNAVAILABLE";publish();return;}
-        busy=true;detail="Checking selected node";publish();
+        busy=true;progress("connections","Checking selected node connection");
         try{
             probeLatency(target);if(record(target).latency>0)probeServices(target);
             if(!record(target).qualified(now())){error="NODE_NOT_HEALTHY";detail="Selected node did not pass the service checks";return;}
             if(pin)pinned=target.id;else pinned="";
             if(current==null||!current.id.equals(target.id))promote(target,true);
             else{phase="connected";error="";detail=connectedDetail();}
-        }finally{busy=false;publish();}
+        }finally{finishChecks();publish();}
     });}
-    public void resumeAuto(){preemptSweep();submit(()->{pinned="";if(!profileUsable||nodes.isEmpty()&&!coreSkipped.isEmpty()){nodesChanged();return;}error="";decide(true);queueSweep(false);publish();});}
+    public void resumeAuto(){preemptSweep();submit(()->{pinned="";if(!profileUsable||nodes.isEmpty()&&!coreSkipped.isEmpty()){nodesChanged();return;}error="";decide(true);if(current!=null&&phase.equals("connected"))detail=connectedDetail();queueSweep(false);publish();});}
     public void preferencesChanged(){
         if(!preferencesQueued.compareAndSet(false,true))return;
         preemptSweep();
@@ -106,7 +108,7 @@ public final class VpnEngine {
             boolean accepted=reloadSafely(new ProfileTransition(){
                 @Override public void pause(){
                     profileUsable=false;tunReady=false;current=null;pinned="";busy=true;phase="testing";
-                    detail="Updating VPN profile; traffic is paused";publish();
+                    stage="profile";detail="Updating VPN profile; traffic is paused";publish();
                     // The Java route guard remains open. No packets can enter a newly
                     // parsed native profile until quickSetup has reported semantic success.
                     Clash.INSTANCE.stopTun();
@@ -128,10 +130,10 @@ public final class VpnEngine {
                     establish(true);
                 }
             });
-            busy=false;
+            busy=false;stage="";
             if(accepted){
                 profileUsable=true;current=survivor[0];pinned=current!=null&&priorPin.equals(current.id)?priorPin:"";
-                phase=current==null?"testing":"connected";error="";detail="Provider nodes updated; checking health";
+                phase=current==null?"testing":"connected";error="";detail=current==null?"Provider nodes updated; checking health":connectedDetail();
                 if(nodes.isEmpty())noNodes();else queueSweep(true);
             }else{
                 profileUsable=false;current=null;pinned="";phase="degraded";error=validated[0]==null?"CORE_CONFIG_REJECTED":rejectionCode(validated[0]);
@@ -157,7 +159,8 @@ public final class VpnEngine {
     private ProfileValidation.Result validateProfile(List<Node> source,String selectedId,CoreDiagnostics.Stage stage)throws Exception{
         coreSkipped=List.of();
         ProfileValidation.Result result=ProfileValidation.validate(source,selectedId,(candidates,selectedName)->{
-            ensureRunning();nodes=List.copyOf(candidates);syncHealth();writeConfig();return quickSetup(selectedName);
+            ensureRunning();progress("profile","Loading servers: "+candidates.size()+" nodes");
+            nodes=List.copyOf(candidates);syncHealth();writeConfig();return quickSetup(selectedName);
         },(diagnostic,skipped)->{
             coreSkipped=skipped;app.recordCoreDiagnostic(diagnostic,stage,skipped.size());publish();
         });
@@ -179,7 +182,7 @@ public final class VpnEngine {
         try{job.run();}
         catch(InterruptedException interrupted){Thread.interrupted();
             if(running.get()&&!preempted)failure("CHECK_CANCELLED");
-            else if(running.get()){busy=false;detail=current==null?"Applying latest selection":connectedDetail();publish();}
+            else if(running.get()){busy=false;stage="";detail=current==null?"Applying latest selection":connectedDetail();publish();}
         }
         catch(Throwable exception){if(running.get()){
             String code=exception instanceof TimeoutException?"CORE_TIMEOUT":nativeReady?"VPN_OPERATION_FAILED":"CORE_UNAVAILABLE";
@@ -194,7 +197,7 @@ public final class VpnEngine {
         error=code;phase=tunReady||guarded?"degraded":"error";
         String message=CoreDiagnostics.messageForCode(code);
         detail=message!=null?message+(guarded?" VPN traffic is paused.":""):tunReady?"VPN needs attention. See diagnostics.":guarded?"VPN traffic is paused. Retry with a valid profile or stop the VPN.":"VPN could not start. See diagnostics.";
-        busy=false;app.log("vpn",code);publish();
+        busy=false;stage="";app.log("vpn",code);publish();
         if(!tunReady&&!guarded){preserveError=true;stop();}
     }
     private void queueSweep(boolean force){
@@ -223,8 +226,9 @@ public final class VpnEngine {
         }
     }
     private void sweep(boolean force)throws Exception{
-        if(nodes.isEmpty()){lastSweep=now();busy=false;noNodes();publish();return;}
-        inSweep=true;busy=true;if(current==null)phase="testing";detail="Testing latency and service availability";publish();
+        if(nodes.isEmpty()){lastSweep=now();busy=false;stage="";noNodes();publish();return;}
+        inSweep=true;busy=true;if(current==null)phase="testing";
+        progress("connections","Testing connections: 0 of "+nodes.size());
         try{
             // Bounded batches keep a large account from opening hundreds of sockets at once.
             for(int offset=0;offset<nodes.size();offset+=8){
@@ -238,6 +242,7 @@ public final class VpnEngine {
                     catch(ExecutionException ignored){result=HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CORE_RESPONSE_FAILED);}
                     recordLatency(batch.get(i),result);
                     if(current!=null&&current.id.equals(batch.get(i).id))lastCurrentCheck=now();
+                    stage="connections";detail="Testing connections: "+(offset+i+1)+" of "+nodes.size();
                 }
                 // A long provider list must not starve the active node's 15-second watchdog.
                 if(current!=null&&now()-lastCurrentCheck>=15_000)checkCurrent(false);
@@ -261,7 +266,7 @@ public final class VpnEngine {
                 phase="degraded";error="NO_HEALTHY_NODE";detail="No node passed all checks. VPN stays active and blocks unverified traffic.";
                 if(current!=null){action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name","REJECT").toString(),5000);action("closeAllConnections",null,5000);current=null;pinned="";}
             }
-        }finally{inSweep=false;busy=false;publish();}
+        }finally{inSweep=false;finishChecks();publish();}
     }
     private void decide(boolean force)throws Exception{
         if(!pinned.isEmpty()){
@@ -300,10 +305,20 @@ public final class VpnEngine {
     }
     private void recordLatency(Node node,HealthDiagnostics.Latency result){record(node).latency(result.millis,now());latencyDiagnostics.put(node.id,result);}
     private String connectedDetail(){return "Node connection checks passed · "+(pinned.isEmpty()?"Auto":"Pinned");}
+    private void progress(String step,String message){stage=step;detail=message;publish();}
+    private void finishChecks(){busy=false;stage="";if(current!=null&&phase.equals("connected")&&error.isEmpty())detail=connectedDetail();}
     private void probeServices(Node n)throws InterruptedException{
         Integer port=ports.get(n.id);if(port==null)return;
-        ServiceChecks.Result r=checks.check(port);SelectionPolicy.Health h=record(n);
-        h.claude=r.claude;h.chatgpt=r.chatgpt;h.gemini=r.gemini;h.servicesAt=now();
+        String previousStage=stage,previousDetail=detail;
+        progress("services","Checking service access: "+n.name);
+        try{
+            ServiceChecks.Result r=checks.check(port);SelectionPolicy.Health h=record(n);
+            h.claude=r.claude;h.chatgpt=r.chatgpt;h.gemini=r.gemini;h.servicesAt=now();
+        }finally{
+            stage=previousStage;detail=previousDetail;
+            if(!busy&&current!=null&&phase.equals("connected")&&error.isEmpty())detail=connectedDetail();
+            publish();
+        }
     }
     private void requestProviderRecovery(){
         ArrayList<String> failed=new ArrayList<>();
@@ -321,7 +336,7 @@ public final class VpnEngine {
         return await(setup,20_000);
     }
     private void establish(boolean reuse)throws Exception{
-        ensureRunning();tunStarted=new CompletableFuture<>();
+        ensureRunning();progress("tunnel","Starting VPN tunnel");tunStarted=new CompletableFuture<>();
         ParcelFileDescriptor descriptor=reuse?service.duplicateTunnel():service.establishTunnel();
         int fd=descriptor.detachFd();descriptor.close();
         // Our UID bypasses the VPN. A mixed/system stack's kernel TCP forwarder
@@ -332,7 +347,7 @@ public final class VpnEngine {
             @Override public String resolverProcess(int protocol,String source,String target,int uid){return "";}
         },"Autopilot",TUN_STACK,AutopilotVpnService.ADDRESSES,AutopilotVpnService.DNS,AutopilotVpnService.MTU);
         if(!await(tunStarted,7000))throw new IOException("TUN_START_FAILED");tunReady=true;
-        app.log("vpn","TUN_STARTED");phase="testing";detail="VPN active; testing nodes";publish();
+        app.log("vpn","TUN_STARTED");phase="testing";progress("connections","Tunnel started; checking nodes");
     }
     private void event(String payload){
         if(payload==null)return;
@@ -416,7 +431,7 @@ public final class VpnEngine {
                 rows.put(row);}
             JSONArray skipped=new JSONArray();for(ProfileValidation.Skipped entry:coreSkipped)skipped.put(entry.json());
             JSONObject snapshot=new JSONObject().put("phase",phase).put("current",current==null?"":current.name).put("pinned",!pinned.isEmpty())
-                .put("auto",pinned.isEmpty()).put("busy",busy).put("error",error).put("detail",detail).put("lastSwitch",lastSwitch).put("nodes",rows).put("tun",tunReady);
+                .put("auto",pinned.isEmpty()).put("busy",busy).put("error",error).put("detail",detail).put("stage",stage).put("lastSwitch",lastSwitch).put("nodes",rows).put("tun",tunReady);
             snapshot.put("coreBaselineAccepted",baselineAccepted).put("skippedCount",coreSkipped.size()).put("skippedNodes",skipped);
             snapshot.put("coreProfileAccepted",profileUsable).put("nodeHealth",HealthDiagnostics.providers(rows)).put("networkSignals",networkSignals.json())
                 .put("checkPath","per-node mixed listener; excluded Autopilot UID").put("resolverPolicy",CoreDnsConfig.POLICY_ID).put("tunStack",TUN_STACK);
@@ -430,7 +445,7 @@ public final class VpnEngine {
         if(nativeReady){try{Clash.INSTANCE.stopTun();}catch(Throwable ignored){}try{Clash.INSTANCE.invokeAction(new JSONObject().put("id","stop-log").put("method","stopLog").put("data",JSONObject.NULL).toString(),(InvokeInterface)value->{});}catch(Throwable ignored){}
             try{Clash.INSTANCE.setEventListener((InvokeInterface)null);}catch(Throwable ignored){}}
         service.releaseTunnel();profileUsable=false;
-        tunReady=false;busy=false;current=null;pinned="";
+        tunReady=false;busy=false;stage="";current=null;pinned="";
         if(preserveError){phase="error";detail="VPN could not start. See diagnostics.";}else{phase="stopped";detail="VPN disconnected";error="";}
         publish();app.log("vpn","STOPPED");
         worker.shutdownNow();service.finished(this);

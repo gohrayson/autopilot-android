@@ -20,13 +20,14 @@ trap collect_evidence EXIT
 
 test -f "$project/app/src/androidTest/java/app/autopilot/android/NativeCoreConfigTest.java"
 test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateDownloadRuntimeTest.java"
+test -f "$project/app/src/androidTest/java/app/autopilot/android/VpnStatusUiTest.java"
 adb wait-for-device
 adb logcat -c
 
 set +e
 gradle -p "$project" --no-daemon --console=plain \
   :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest,app.autopilot.android.UpdateDownloadRuntimeTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest,app.autopilot.android.UpdateDownloadRuntimeTest,app.autopilot.android.VpnStatusUiTest \
   2>&1 | tee "$results/native-core-gradle.log"
 gradle_status=${PIPESTATUS[0]}
 set -e
@@ -46,6 +47,7 @@ selected = {
         "concurrentRangesPublishOnlyCompleteVerifiedBytes",
         "interruptedPrefixesResumeAcrossDownloaderInstances",
     },
+    "app.autopilot.android.VpnStatusUiTest": {"connectionProgressAndActiveNodeRenderTruthfully"},
 }
 cases = []
 for report in root.rglob("*.xml"):

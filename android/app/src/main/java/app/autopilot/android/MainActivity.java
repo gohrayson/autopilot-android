@@ -87,9 +87,27 @@ public final class MainActivity extends Activity {
         if(isFinishing())return;
         JSONObject s=app.state();String p=s.optString("phase","idle"),current=s.optString("current","");
         boolean running=app.engine!=null && !Set.of("stopped","idle","error").contains(p);
-        phase.setText(s.optBoolean("pinned")?"PINNED NODE":running?"AUTO · "+p.toUpperCase(Locale.ROOT):p.equals("error")?"NEEDS ATTENTION":"READY");
-        phase.setTextColor(p.equals("connected")?GREEN:p.equals("error")?RED:BLUE);
-        selected.setText(current.isEmpty()?(p.equals("error")?"Connection failed":p.equals("degraded")&&running?"Traffic paused":app.providers.nodes().isEmpty()?"Connect an account":"Ready to connect"):current);
+        boolean connected=p.equals("connected")&&!current.isEmpty();
+        phase.setText(switch(p){
+            case "starting"->"STARTING";case "testing"->"CHECKING NODES";
+            case "connected"->connected?(s.optBoolean("pinned")?"CONNECTED · PINNED":"CONNECTED · AUTO"):"CHECKING NODES";
+            case "degraded"->"TRAFFIC PAUSED";case "paused"->"AUTO PAUSED";
+            case "error"->"NEEDS ATTENTION";case "stopped"->"DISCONNECTED";default->"READY";
+        });
+        phase.setTextColor(connected?GREEN:Set.of("error","degraded").contains(p)?RED:BLUE);
+        JSONArray stateNodes=s.optJSONArray("nodes");
+        boolean hasNodes=!app.providers.nodes().isEmpty()||stateNodes!=null&&stateNodes.length()>0;
+        selected.setText(switch(p){
+            case "starting"->"Starting VPN";
+            case "testing"->!current.isEmpty()?current:switch(s.optString("stage")){
+                case "services"->"Checking service access";case "tunnel"->"Starting VPN";
+                case "profile"->"Updating VPN";default->"Testing nodes";
+            };
+            case "connected"->connected?current:"Checking connection";
+            case "degraded"->"Traffic paused";case "paused"->current.isEmpty()?"Auto paused":current;
+            case "error"->"Connection failed";
+            default->hasNodes?"Ready to connect":"Connect an account";
+        });
         detail.setText(s.optString("detail",running?"Checking your connection…":"Automatic switching stays active unless you pin a node."));
         error.setText(errorMessage(s.optString("error","")));error.setVisibility(error.getText().length()==0?View.GONE:View.VISIBLE);
         connect.setText(running?"Stop VPN":"Start VPN");connect.setEnabled(running||!app.providers.nodes().isEmpty());
