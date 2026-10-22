@@ -100,3 +100,43 @@ DNS, fake-IP reverse mapping and service Stop cleanup.
 The 0.1.5 UI was verified on the hosted Android emulator. The physical phone's
 working 0.1.4 connection was preserved while preparing the update. Documentation
 changes following this successful run do not change the tested Java sources.
+
+## Publication and live updater discovery
+
+Published release `420229110` at `2026-10-22T01:55:03Z`:
+[android-v0.1.5](https://github.com/gohrayson/autopilot-android/releases/tag/android-v0.1.5).
+The public release was read back through the GitHub API: `draft=false`, all
+assets uploaded, APK size `47779978`, APK SHA-256
+`ac20475463374df5784566203a4d10bcb9d65af6bfeae37fc791a5f6fbf59d11`.
+The source ZIP SHA-256 is
+`2d55503b1646b8285262f9f358a77c72154b39e69ac334d33e21b505bdbeb4dd`.
+Tag source `1367538` adds only documentation after the tested `f75e194` sources.
+
+The retained original updater classes from tag `android-v0.1.2` fetched and
+validated the actual public latest manifest through the existing local HTTPS
+proxy; no proxy or VPN settings changed. Reproduction from the repo root:
+
+```powershell
+$ErrorActionPreference='Stop'
+& .data/hosted-update-probe/probe-legacy.ps1 -CompileOnly
+. .data/android-tools/env.ps1
+$jsonJar=@(Get-ChildItem -LiteralPath (Join-Path $env:GRADLE_USER_HOME 'caches/modules-2/files-2.1/org.json/json/20240303') -Recurse -File -Filter 'json-20240303.jar')
+if($jsonJar.Count -ne 1){throw 'Expected cached org.json JAR'}
+$classPath=(Join-Path (Get-Location) '.data/legacy-012-discovery/classes')+[IO.Path]::PathSeparator+$jsonJar[0].FullName
+& (Join-Path $env:JAVA_HOME 'bin/java.exe') '-Dhttps.proxyHost=127.0.0.1' '-Dhttps.proxyPort=7890' -cp $classPath app.autopilot.android.LegacyFeedProbe 'https://github.com/gohrayson/autopilot-android/releases/latest/download/latest.json' '0.1.5' 'ac20475463374df5784566203a4d10bcb9d65af6bfeae37fc791a5f6fbf59d11'
+if($LASTEXITCODE -ne 0){throw 'Published feed discovery failed'}
+```
+
+Verbatim output:
+
+```text
+Legacy discovery probe compiled against retained 0.1.2 classes; no network request.
+LEGACY_012_UPDATE_DISCOVERY_PASS version=0.1.5 versionCode=6 newerThanInstalled3=true Android16Supported=true sha256=ac20475463374df5784566203a4d10bcb9d65af6bfeae37fc791a5f6fbf59d11
+```
+
+Log: `.data/android-015-live-update-feed.log`. This proves hosted discovery and
+manifest compatibility; it does not claim the phone has installed 0.1.5.
+The physical phone remains on its working 0.1.4 connection. The release uses the
+same app ID and signing certificate for an in-place update retaining app data.
+This publication receipt is a post-release documentation addition; published
+release assets were not regenerated or overwritten.
