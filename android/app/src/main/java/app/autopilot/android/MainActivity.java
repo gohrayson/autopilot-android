@@ -27,7 +27,7 @@ public final class MainActivity extends Activity {
     private LinearLayout content, nodeList;
     private TextView phase, selected, detail, countries, oneStatus, octoStatus, nodeSummary, error, updateSummary;
     private AlertDialog updateDialog;
-    private TextView updateDialogStatus, updateDialogNotes, updateProgressText;
+    private TextView updateDialogStatus, updateDialogNotes, updateProgressText, updateActionHint;
     private ProgressBar updateProgressBar;
     private Button updateCheck, updateDownload, updateInstall, updatePause;
     private String lastRenderedNodes;
@@ -219,10 +219,11 @@ public final class MainActivity extends Activity {
             case "Updates"->updatesDialog();case "Bypass apps"->bypassDialog();case "Diagnostics"->diagnostics();case "Android app settings"->startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));case "About & licenses"->about();default->{} }return true;});menu.show();}
     private String updateStatus(JSONObject state){
         String phase=state.optString("phase"),version=state.optString("versionName");
-        String status=switch(phase){case "checking"->"Checking for updates…";case "downloading"->state.optBoolean("downloadPausing")?"Pausing download…":"Downloading "+version+"…";case "verifying"->"Verifying version "+version+"…";case "paused"->"Download paused. Saved parts are kept.";case "interrupted"->"Download interrupted. Ready to resume.";case "installing"->"Android is installing version "+version;case "confirmation"->"Android needs your confirmation to install "+version;case "ready"->"Version "+version+" is ready to install";case "available"->"Version "+version+" is available";case "current"->"You have the latest version";case "error"->"Update needs attention";default->"Automatic update checks are ready";};
+        String status=switch(phase){case "restoring"->"Checking saved update files…";case "checking"->"Checking for updates…";case "downloading"->state.optBoolean("downloadPausing")?"Pausing download…":"Downloading "+version+"…";case "verifying"->"Verifying version "+version+"…";case "preparing-install"->"Preparing Android’s installer…";case "paused"->"Download paused. Saved parts are kept.";case "interrupted"->"Download interrupted. Ready to resume.";case "installing"->"Android is installing version "+version;case "confirmation"->"Android needs your confirmation to install "+version;case "ready"->"Version "+version+" is ready to install";case "available"->"Version "+version+" is available";case "current"->"You have the latest version";case "error"->"Update needs attention";default->"Automatic update checks are ready";};
+        if(state.optBoolean("busy"))status+="\n"+getString(R.string.update_operation_elapsed,Math.max(0,state.optLong("operationElapsedMs"))/1000);
         if(state.optBoolean("ready")&&phase.equals("ready")&&app.updates.automaticInstalls())status+=!state.optBoolean("installPermission")?"\nAllow updates from Autopilot to enable installation.":state.optBoolean("vpnDefersInstall")?"\nAutomatic installation waits until the VPN is stopped.":Build.VERSION.SDK_INT<31?"\nTap Install update to continue.":"\nAutomatic installation is enabled.";
         String failure=UpdateManager.message(state.optString("error"));
-        return status+(failure.isEmpty()?"":"\n"+failure);
+        return status+(failure.isEmpty()?"":"\n"+failure+" ("+state.optString("error")+")");
     }
     private void renderUpdates(){
         JSONObject state=app.updates.state();
@@ -235,8 +236,12 @@ public final class MainActivity extends Activity {
         String notes=state.optString("notes");updateDialogNotes.setText(notes);updateDialogNotes.setVisibility(notes.isEmpty()?View.GONE:View.VISIBLE);
         long total=Math.max(0,Math.min(UpdateManifest.MAX_APK_BYTES,state.optLong("downloadTotalBytes")));
         long downloaded=Math.max(0,Math.min(total,state.optLong("downloadedBytes")));
+        String currentPhase=state.optString("phase");boolean busy=state.optBoolean("busy");
+        boolean indeterminate=busy&&Set.of("restoring","checking","verifying","preparing-install").contains(currentPhase);
         int percent=total==0?0:(int)(downloaded*100/total);boolean showProgress=state.optBoolean("available")&&total>0;
-        updateProgressBar.setVisibility(showProgress?View.VISIBLE:View.GONE);updateProgressText.setVisibility(showProgress?View.VISIBLE:View.GONE);updateProgressBar.setProgress(percent);
+        updateProgressBar.setVisibility(showProgress||indeterminate?View.VISIBLE:View.GONE);updateProgressBar.setIndeterminate(indeterminate);
+        updateProgressBar.setContentDescription(indeterminate?"Update operation in progress":"Update download progress");
+        updateProgressText.setVisibility(showProgress&&!indeterminate?View.VISIBLE:View.GONE);updateProgressBar.setProgress(percent);
         if(showProgress){
             String transfer=getString(R.string.update_download_amount,percent,formatBytes(downloaded),formatBytes(total));
             if("downloading".equals(state.optString("phase"))){
@@ -247,10 +252,27 @@ public final class MainActivity extends Activity {
             }
             updateProgressText.setText(transfer);
         }
-        boolean busy=state.optBoolean("busy");updateCheck.setEnabled(!busy);updateDownload.setEnabled(!busy&&state.optBoolean("available")&&!state.optBoolean("ready"));updateInstall.setEnabled(!busy&&state.optBoolean("ready"));
+        updateCheck.setEnabled(!busy);updateCheck.setText(busy&&"checking".equals(currentPhase)?R.string.update_checking:R.string.update_check_now);
+        updateDownload.setEnabled(!busy&&state.optBoolean("available")&&!state.optBoolean("ready"));updateInstall.setEnabled(!busy&&state.optBoolean("ready"));
         updateDownload.setText(state.optBoolean("canResume")?R.string.update_resume_download:R.string.update_download);
+        updateInstall.setText("preparing-install".equals(currentPhase)?R.string.update_preparing_install:R.string.update_install);
+        String hint=updateActionHint(state),failureCode=state.optString("error");
+        if(!failureCode.isEmpty()&&!busy)hint=UpdateManager.message(failureCode)+" ("+failureCode+")\n"+hint;
+        updateActionHint.setText(hint);updateActionHint.setTextColor(failureCode.isEmpty()?MUTED:RED);
         updatePause.setVisibility(busy&&"downloading".equals(state.optString("phase"))?View.VISIBLE:View.GONE);updatePause.setEnabled(state.optBoolean("canPause"));
         updatePause.setText(state.optBoolean("downloadPausing")?R.string.update_pausing_download:R.string.update_pause_download);
+    }
+    private String updateActionHint(JSONObject state){
+        if(state.optBoolean("busy"))return switch(state.optString("phase")){
+            case "checking"->getString(R.string.update_hint_checking,state.optString("feedHost"));
+            case "verifying"->getString(R.string.update_hint_verifying);
+            case "preparing-install"->getString(R.string.update_hint_installing);
+            case "downloading"->getString(R.string.update_hint_downloading);
+            default->getString(R.string.update_hint_wait);
+        };
+        if(state.optBoolean("ready"))return getString(R.string.update_hint_ready);
+        if(state.optBoolean("available"))return getString(R.string.update_hint_available);
+        return getString("current".equals(state.optString("phase"))?R.string.update_hint_current:R.string.update_hint_check);
     }
     private String formatBytes(long bytes){return android.text.format.Formatter.formatShortFileSize(this,Math.max(0,bytes));}
     private String formatEta(long seconds){
@@ -265,9 +287,10 @@ public final class MainActivity extends Activity {
         updateDialogStatus=addText(body,"",14,INK);updateDialogNotes=addText(body,"",13,MUTED);updateDialogNotes.setTextIsSelectable(true);
         updateProgressBar=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);updateProgressBar.setMax(100);body.addView(updateProgressBar,full());
         updateProgressText=addText(body,"",13,MUTED);
+        updateActionHint=addText(body,"",13,MUTED);updateActionHint.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         addText(body,getString(R.string.update_download_features),12,MUTED);
-        updateCheck=button("Check now",false);updateCheck.setOnClickListener(v->app.updates.checkNow());body.addView(updateCheck,full());
-        updateDownload=button("Download update",false);updateDownload.setOnClickListener(v->app.updates.downloadNow());body.addView(updateDownload,full());
+        updateCheck=button(getString(R.string.update_check_now),false);updateCheck.setOnClickListener(v->{updateAction(app.updates.requestCheckNow());});body.addView(updateCheck,full());
+        updateDownload=button("Download update",false);updateDownload.setOnClickListener(v->{updateAction(app.updates.requestDownloadNow());});body.addView(updateDownload,full());
         updatePause=button(getString(R.string.update_pause_download),false);updatePause.setOnClickListener(v->app.updates.pauseDownload());body.addView(updatePause,full());
         updateInstall=button("Install update",true);updateInstall.setOnClickListener(v->installUpdate());body.addView(updateInstall,full());
         addText(body,"Installing restarts Autopilot. Reopen it to reconnect. Your accounts and preferences are kept.",12,MUTED);
@@ -280,23 +303,24 @@ public final class MainActivity extends Activity {
         Button server=button("Update server",false);server.setOnClickListener(v->updateServerDialog());body.addView(server,full());
         ScrollView scroll=new ScrollView(this);scroll.addView(body);
         updateDialog=new AlertDialog.Builder(this).setTitle("App updates").setView(scroll).setPositiveButton("Close",null).create();
-        updateDialog.setOnDismissListener(d->{updateDialog=null;updateDialogStatus=null;updateDialogNotes=null;updateProgressBar=null;updateProgressText=null;updateCheck=null;updateDownload=null;updatePause=null;updateInstall=null;});updateDialog.show();renderUpdates();
+        updateDialog.setOnDismissListener(d->{updateDialog=null;updateDialogStatus=null;updateDialogNotes=null;updateProgressBar=null;updateProgressText=null;updateActionHint=null;updateCheck=null;updateDownload=null;updatePause=null;updateInstall=null;});updateDialog.show();renderUpdates();
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED&&!getPreferences(MODE_PRIVATE).getBoolean("updateNotificationAsked",false)){
             getPreferences(MODE_PRIVATE).edit().putBoolean("updateNotificationAsked",true).apply();requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},104);
         }
     }
     private void updateServerDialog(){
         EditText url=new EditText(this);url.setText(app.updates.feedUrl());url.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI);url.setSingleLine(false);url.setSelectAllOnFocus(true);
-        AlertDialog server=new AlertDialog.Builder(this).setTitle("Public HTTPS update feed").setMessage("The default GitHub server is ready to use. Only change this for your own release feed.").setView(url).setPositiveButton("Save",null).setNeutralButton("Use default",(d,w)->{try{app.updates.setFeedUrl(UpdateManager.DEFAULT_FEED);}catch(UpdateDownload.UpdateException error){toast(UpdateManager.message(error.code));}}).setNegativeButton("Cancel",null).create();
-        server.setOnShowListener(d->server.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{try{app.updates.setFeedUrl(url.getText().toString());server.dismiss();app.updates.checkNow();}catch(UpdateDownload.UpdateException error){toast(UpdateManager.message(error.code));}}));server.show();
+        AlertDialog server=new AlertDialog.Builder(this).setTitle("Public HTTPS update feed").setMessage("The default GitHub server is ready to use. Only change this for your own release feed.").setView(url).setPositiveButton("Save",null).setNeutralButton("Use default",(d,w)->{try{app.updates.setFeedUrl(UpdateManager.DEFAULT_FEED);updateAction(app.updates.requestCheckNow());}catch(UpdateDownload.UpdateException error){toast(UpdateManager.message(error.code));}}).setNegativeButton("Cancel",null).create();
+        server.setOnShowListener(d->server.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{try{app.updates.setFeedUrl(url.getText().toString());server.dismiss();updateAction(app.updates.requestCheckNow());}catch(UpdateDownload.UpdateException error){toast(UpdateManager.message(error.code));}}));server.show();
     }
     private void installUpdate(){
         if(!getPackageManager().canRequestPackageInstalls()){
             installPermission();
             return;
         }
-        app.updates.prepareInstall(intent->{if(isFinishing()||isDestroyed()||!visible)return;try{startActivity(intent);}catch(ActivityNotFoundException unavailable){toast("Android’s package installer could not open. Try again from Updates.");}});
+        updateAction(app.updates.requestPrepareInstall(intent->{if(isFinishing()||isDestroyed()||!visible)return;try{startActivity(intent);}catch(ActivityNotFoundException unavailable){toast("Android’s package installer could not open. Try again from Updates.");}}));
     }
+    private void updateAction(boolean accepted){if(!accepted)toast(UpdateManager.message("UPDATE_BUSY"));renderUpdates();}
     private void installPermission(){
         toast("Allow Autopilot to install updates, then return to Updates. Android may still ask you to confirm installation.");
         try{startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+getPackageName())));}catch(ActivityNotFoundException unavailable){toast("Open Android app settings and allow installs from Autopilot.");}

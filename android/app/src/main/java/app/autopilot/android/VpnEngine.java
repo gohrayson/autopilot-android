@@ -38,12 +38,24 @@ public final class VpnEngine {
     private boolean preserveError;
     private boolean startedOnce;
     private volatile boolean profileUsable;
+    private static final class UpdateRoute {
+        final int port; final long checkedAt, expiresAt;
+        UpdateRoute(int port,long checkedAt,long expiresAt){this.port=port;this.checkedAt=checkedAt;this.expiresAt=expiresAt;}
+    }
+    private static final UpdateRoute NO_UPDATE_ROUTE=new UpdateRoute(-1,0,0);
+    private volatile UpdateRoute updateRoute=NO_UPDATE_ROUTE;
     private boolean baselineAccepted;
     private volatile List<ProfileValidation.Skipped> coreSkipped=List.of();
     private long lastSweep;
     private long lastCurrentCheck;
     private File home;
     public VpnEngine(AutopilotVpnService service,AutopilotApp app){this.service=service;this.app=app;}
+    /** Thread-safe updater snapshot. The caller uses direct only after this engine is removed. */
+    public int updateProxyPort(){
+        UpdateRoute route=updateRoute;long time=now();
+        return running.get()&&!stopping.get()&&nativeReady&&profileUsable&&tunReady
+                &&time>=route.checkedAt&&time<=route.expiresAt?route.port:-1;
+    }
     public void start(){if(!running.compareAndSet(false,true))return;submit(()->{
         // The first serialized job publishes its phase before any startup I/O.
         phase="starting";busy=true;progress("preparing","Preparing connection");
@@ -74,6 +86,7 @@ public final class VpnEngine {
     });}
     public void stop(){
         if(!stopping.compareAndSet(false,true))return;
+        updateRoute=NO_UPDATE_ROUTE;
         running.set(false);Thread thread=activeThread;if(thread!=null)thread.interrupt();
         try{worker.execute(()->{Thread.interrupted();cleanup();});}catch(RejectedExecutionException ignored){cleanup();}
     }
@@ -107,6 +120,7 @@ public final class VpnEngine {
             final ProfileValidation.Result[] validated={null};
             boolean accepted=reloadSafely(new ProfileTransition(){
                 @Override public void pause(){
+                    updateRoute=NO_UPDATE_ROUTE;
                     profileUsable=false;tunReady=false;current=null;pinned="";busy=true;phase="testing";
                     stage="profile";detail="Updating VPN profile; traffic is paused";publish();
                     // The Java route guard remains open. No packets can enter a newly
@@ -170,6 +184,7 @@ public final class VpnEngine {
     }
     private static String rejectionCode(ProfileValidation.Result profile){return profile.limitReached?CoreDiagnostics.Kind.PROXY_LIMIT.code:profile.lastDiagnostic==null?"CORE_CONFIG_REJECTED":profile.lastDiagnostic.code;}
     private void noNodes(){
+        updateRoute=NO_UPDATE_ROUTE;
         phase="degraded";
         if(!coreSkipped.isEmpty()){error=CoreDiagnostics.Kind.PROXY_EMPTY.code;detail="The cached nodes are incompatible with the VPN core. See diagnostics. VPN is blocking traffic.";}
         else{error="NO_NODES";detail="No nodes. Sign in to a provider or import a profile.";}
@@ -193,6 +208,7 @@ public final class VpnEngine {
     }
     private void preemptSweep(){synchronized(operationLock){if(inSweep&&activeThread!=null){preempted=true;activeThread.interrupt();}}}
     private void failure(String code){
+        updateRoute=NO_UPDATE_ROUTE;
         boolean guarded=startedOnce&&service.hasTunnel();
         error=code;phase=tunReady||guarded?"degraded":"error";
         String message=CoreDiagnostics.messageForCode(code);
@@ -303,7 +319,8 @@ public final class VpnEngine {
         catch(ExecutionException ignored){result=HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CORE_RESPONSE_FAILED);}
         recordLatency(n,result);
     }
-    private void recordLatency(Node node,HealthDiagnostics.Latency result){record(node).latency(result.millis,now());latencyDiagnostics.put(node.id,result);}
+    private void recordLatency(Node node,HealthDiagnostics.Latency result){record(node).latency(result.millis,now());latencyDiagnostics.put(node.id,result);
+        if(current!=null&&current.id.equals(node.id)&&!record(node).qualified(now()))updateRoute=NO_UPDATE_ROUTE;}
     private String connectedDetail(){return "Node connection checks passed · "+(pinned.isEmpty()?"Auto":"Pinned");}
     private void progress(String step,String message){stage=step;detail=message;publish();}
     private void finishChecks(){busy=false;stage="";if(current!=null&&phase.equals("connected")&&error.isEmpty())detail=connectedDetail();}
@@ -418,6 +435,14 @@ public final class VpnEngine {
     private Node findByName(String name){for(Node n:nodes)if(n.name.equals(name))return n;return null;}
     private static long now(){return System.currentTimeMillis();}
     private void publish(){
+        // Only the serialized controller reads health/maps. Download workers consume one immutable snapshot.
+        UpdateRoute next=NO_UPDATE_ROUTE;long time=now();
+        if(running.get()&&!stopping.get()&&nativeReady&&profileUsable&&tunReady&&current!=null&&"connected".equals(phase)){
+            SelectionPolicy.Health active=record(current);Integer port=ports.get(current.id);
+            if(active!=null&&active.qualified(time)&&port!=null&&port>0&&port<=65535)
+                next=new UpdateRoute(port,time,Math.min(active.latencyAt+SelectionPolicy.LATENCY_TTL,active.servicesAt+SelectionPolicy.SERVICE_TTL));
+        }
+        updateRoute=next;
         try{
             JSONArray rows=new JSONArray();ArrayList<SelectionPolicy.Health> ordered=new ArrayList<>(health.values());ordered.sort(SelectionPolicy.order(app.preferred()));
             for(SelectionPolicy.Health h:ordered){Node n=findById(h.id);if(n==null)continue;
@@ -441,6 +466,7 @@ public final class VpnEngine {
         }catch(JSONException ignored){}
     }
     private void cleanup(){
+        updateRoute=NO_UPDATE_ROUTE;
         running.set(false);checks.close();
         if(nativeReady){try{Clash.INSTANCE.stopTun();}catch(Throwable ignored){}try{Clash.INSTANCE.invokeAction(new JSONObject().put("id","stop-log").put("method","stopLog").put("data",JSONObject.NULL).toString(),(InvokeInterface)value->{});}catch(Throwable ignored){}
             try{Clash.INSTANCE.setEventListener((InvokeInterface)null);}catch(Throwable ignored){}}

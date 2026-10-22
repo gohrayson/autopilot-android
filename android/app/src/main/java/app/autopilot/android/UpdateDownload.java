@@ -9,6 +9,8 @@ import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
+import java.net.Proxy;
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
@@ -26,6 +28,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.IntSupplier;
+import java.util.function.Consumer;
 import javax.net.ssl.HttpsURLConnection;
 
 /** Bounded public HTTPS downloads. Redirects stay within the source origin or GitHub's release hosts. */
@@ -54,19 +58,34 @@ public final class UpdateDownload {
     }
     public interface ProgressListener { void onProgress(long downloaded, long total, int activeConnections); }
     private final Transport transport;
+    private final long manifestTimeoutMillis;
 
-    public UpdateDownload() { this(new HttpsTransport()); }
-    public UpdateDownload(Transport transport) {
+    public UpdateDownload() { this(() -> 0, null); }
+    /**
+     * The supplier is called from download workers for every request, including redirects/ranges.
+     * It must return a thread-safe snapshot: 0 only when no Autopilot VPN is active, a positive
+     * loopback proxy port for the verified current node, or -1 while the VPN has no usable route.
+     * A failed VPN request never falls back to a direct connection.
+     */
+    public UpdateDownload(IntSupplier activeProxyPort, Consumer<String> routeObserver) {
+        this(new HttpsTransport(activeProxyPort, routeObserver, (uri, proxy) ->
+                (HttpsURLConnection) uri.toURL().openConnection(proxy)));
+    }
+    public UpdateDownload(Transport transport) { this(transport, 30_000); }
+    UpdateDownload(Transport transport, long manifestTimeoutMillis) {
         if (transport == null) throw new IllegalArgumentException("transport");
+        if (manifestTimeoutMillis <= 0) throw new IllegalArgumentException("manifestTimeoutMillis");
         this.transport = transport;
+        this.manifestTimeoutMillis = manifestTimeoutMillis;
     }
 
     public UpdateManifest fetchManifest(String manifestUrl, String expectedPackage) throws UpdateException {
         URI source = UpdateManifest.publicHttpsUri(manifestUrl);
-        long deadline = System.nanoTime() + 30_000_000_000L;
+        Session session = new Session(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(manifestTimeoutMillis));
         try {
-            checkCancelled();
-            try (Response response = openResponse(source, deadline)) {
+            session.check();
+            Response response = openResponse(source, session.deadline, -1, -1, session);
+            try {
                 requireOk(response);
                 if (response.contentLength() > UpdateManifest.MAX_MANIFEST_BYTES) throw error("UPDATE_RESPONSE_SIZE");
                 byte[] bytes;
@@ -74,23 +93,21 @@ public final class UpdateDownload {
                     byte[] buffer = new byte[8192];
                     int read;
                     while ((read = input.read(buffer)) != -1) {
-                        checkProgress(deadline);
+                        session.check();
                         if ((long) output.size() + read > UpdateManifest.MAX_MANIFEST_BYTES) throw error("UPDATE_RESPONSE_SIZE");
                         output.write(buffer, 0, read);
                     }
-                    checkProgress(deadline);
+                    session.check();
                     bytes = output.toByteArray();
                 }
                 if (response.contentLength() >= 0 && response.contentLength() != bytes.length) throw error("UPDATE_RESPONSE_SIZE");
                 String json = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                         .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
                 return UpdateManifest.parse(json, source.toASCIIString(), expectedPackage);
-            }
-        } catch (UpdateException failure) { throw failure; }
-        catch (SocketTimeoutException failure) { throw error("UPDATE_TIMEOUT"); }
-        catch (InterruptedIOException failure) { throw error("UPDATE_CANCELLED"); }
-        catch (java.nio.charset.CharacterCodingException failure) { throw error("UPDATE_INVALID_MANIFEST"); }
-        catch (IOException failure) { throw error("UPDATE_NETWORK_ERROR"); }
+            } finally { session.release(response); }
+        } catch (java.nio.charset.CharacterCodingException failure) { throw error("UPDATE_INVALID_MANIFEST"); }
+        catch (IOException failure) { throw normalize(failure, session); }
+        finally { session.finish(); }
     }
 
     /** The caller must supply its private cache directory and verify the returned APK's Android signer. */
@@ -397,6 +414,10 @@ public final class UpdateDownload {
     }
     private static final class RangeUnsupported extends IOException { }
     private static final class ServerFailure extends IOException { }
+    /** Keep transient proxy I/O retryable without retaining upstream addresses or exception text. */
+    private static final class VpnProxyFailure extends IOException {
+        VpnProxyFailure() { super("UPDATE_VPN_PROXY_ERROR"); }
+    }
     private static void requireIdentity(Response response) throws UpdateException {
         String encoding = response.contentEncoding();
         if (encoding != null && !encoding.isEmpty() && !"identity".equalsIgnoreCase(encoding.trim())) throw error("UPDATE_RESPONSE_ENCODING");
@@ -427,9 +448,11 @@ public final class UpdateDownload {
                 || code.equals("UPDATE_RESPONSE_ENCODING") || code.equals("UPDATE_CACHE_ERROR") || code.equals("UPDATE_UNSAFE_URL");
     }
     private static UpdateException normalize(IOException failure, Session session) {
-        if (failure instanceof UpdateException) return (UpdateException) failure;
-        if (Thread.currentThread().isInterrupted() || failure instanceof InterruptedIOException && !(failure instanceof SocketTimeoutException)) return error("UPDATE_CANCELLED");
+        if (Thread.currentThread().isInterrupted()) return error("UPDATE_CANCELLED");
         if (failure instanceof SocketTimeoutException || System.nanoTime() > session.deadline) return error("UPDATE_TIMEOUT");
+        if (failure instanceof UpdateException) return (UpdateException) failure;
+        if (failure instanceof InterruptedIOException) return error("UPDATE_CANCELLED");
+        if (failure instanceof VpnProxyFailure) return error("UPDATE_VPN_PROXY_ERROR");
         if (failure instanceof ServerFailure) return error("UPDATE_HTTP_ERROR");
         return error("UPDATE_NETWORK_ERROR");
     }
@@ -486,9 +509,6 @@ public final class UpdateDownload {
     private static void requireOk(Response response) throws IOException {
         if (response.status() != 200) throw error("UPDATE_HTTP_ERROR");
     }
-    private Response openResponse(URI initial, long deadline) throws IOException {
-        return openResponse(initial, deadline, -1, -1, null);
-    }
     private Response openResponse(URI initial, long deadline, long start, long end, Session session) throws IOException {
         URI current = initial;
         for (int redirects = 0; ; redirects++) {
@@ -544,12 +564,31 @@ public final class UpdateDownload {
         return bytes;
     }
 
-    private static final class HttpsTransport implements Transport {
+    interface ConnectionFactory { HttpsURLConnection open(URI uri, Proxy proxy) throws IOException; }
+    /** The factory seam is package-private and used only by transport tests; production uses platform TLS unchanged. */
+    static final class HttpsTransport implements Transport {
+        private final IntSupplier activeProxyPort;
+        private final Consumer<String> routeObserver;
+        private final ConnectionFactory connections;
+        HttpsTransport(IntSupplier activeProxyPort, Consumer<String> routeObserver, ConnectionFactory connections) {
+            if (activeProxyPort == null || connections == null) throw new IllegalArgumentException("transport route");
+            this.activeProxyPort = activeProxyPort; this.routeObserver = routeObserver; this.connections = connections;
+        }
+        private void observed(String route) { if (routeObserver != null) try { routeObserver.accept(route); } catch (RuntimeException ignored) { } }
         public Response open(URI uri) throws IOException {
             return open(uri, -1, -1);
         }
         public Response open(URI uri, long start, long end) throws IOException {
-            HttpsURLConnection connection = (HttpsURLConnection) uri.toURL().openConnection();
+            int port;
+            try { port = activeProxyPort.getAsInt(); }
+            catch (RuntimeException unavailable) { observed("vpn-unavailable"); throw error("UPDATE_VPN_ROUTE_UNAVAILABLE"); }
+            if (port < 0 || port > 65535) { observed("vpn-unavailable"); throw error("UPDATE_VPN_ROUTE_UNAVAILABLE"); }
+            final boolean vpn = port > 0;
+            Proxy proxy = vpn ? new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", port)) : Proxy.NO_PROXY;
+            observed(vpn ? "vpn" : "direct");
+            HttpsURLConnection connection;
+            try { connection = connections.open(uri, proxy); }
+            catch (IOException failure) { throw routedFailure(failure, vpn); }
             connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(20_000);
             connection.setReadTimeout(20_000);
@@ -561,14 +600,24 @@ public final class UpdateDownload {
             connection.setRequestProperty("User-Agent", "Autopilot-Android-Updater/1");
             // Provider/session headers are never passed into this independent public transport.
             return new Response() {
-                public int status() throws IOException { return connection.getResponseCode(); }
+                public int status() throws IOException { try { return connection.getResponseCode(); } catch (IOException failure) { throw routedFailure(failure, vpn); } }
                 public long contentLength() { return connection.getContentLengthLong(); }
-                public InputStream body() throws IOException { return connection.getInputStream(); }
+                public InputStream body() throws IOException {
+                    try { return new java.io.FilterInputStream(connection.getInputStream()) {
+                        @Override public int read() throws IOException { try { return super.read(); } catch (IOException failure) { throw routedFailure(failure, vpn); } }
+                        @Override public int read(byte[] bytes, int offset, int length) throws IOException { try { return in.read(bytes, offset, length); } catch (IOException failure) { throw routedFailure(failure, vpn); } }
+                    }; } catch (IOException failure) { throw routedFailure(failure, vpn); }
+                }
                 public String location() { return connection.getHeaderField("Location"); }
                 public String contentRange() { return connection.getHeaderField("Content-Range"); }
                 public String contentEncoding() { return connection.getHeaderField("Content-Encoding"); }
                 public void close() { connection.disconnect(); }
             };
+        }
+        private static IOException routedFailure(IOException failure, boolean vpn) {
+            if (!vpn || failure instanceof UpdateException || failure instanceof VpnProxyFailure || failure instanceof InterruptedIOException
+                    || failure instanceof javax.net.ssl.SSLException || Thread.currentThread().isInterrupted()) return failure;
+            return new VpnProxyFailure();
         }
     }
 }

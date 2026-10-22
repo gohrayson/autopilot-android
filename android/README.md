@@ -2,6 +2,8 @@
 
 Native Android client for Autopilot. Requires Android 8.0 or later; includes ARM64, ARMv7 and x86_64. The Windows application is independent.
 
+Version 0.1.6 routes update requests through the active verified VPN node. Without a running Autopilot VPN it connects directly. A running VPN without a verified node reports that the update route is unavailable. Update checks show progress and specific errors; a verified downloaded APK is kept ready instead of being locked behind automatic network checks. Verification evidence is recorded in [ANDROID_016_RECEIPTS.md](ANDROID_016_RECEIPTS.md).
+
 Version 0.1.5 shows the actual connection stage and completed node checks during startup. An active node stays visible during background tests, and idle Auto/Pinned detail returns after the checks finish. "Ready to connect" is reserved for a stopped connection with cached nodes. The real Android Activity rendering probe is documented in [ANDROID_015_RECEIPTS.md](ANDROID_015_RECEIPTS.md).
 
 Version 0.1.4 replaces the Android tunnel's mixed TCP handling with the userspace gVisor stack. The mixed stack's kernel TCP forwarder conflicted with Autopilot's own UID being excluded from the VPN: node checks passed while other apps' TCP connections timed out. The failing separate-UID test and the same test's restored IPv4/IPv6 traffic are recorded in [the investigation receipt](ANDROID_014_RECEIPTS.md).
@@ -51,7 +53,7 @@ For HyperOS background operation, open Autopilot's Android app settings and set 
 
 Version 0.1.2 includes an **Updates** panel on the main screen and in the **⋯** menu. It uses the free public GitHub release feed at [`latest.json`](https://github.com/gohrayson/autopilot-android/releases/latest/download/latest.json) by default; no update server setup or GitHub sign-in is needed. A custom public HTTPS feed can be configured through **Update server**.
 
-Automatic checks, Wi-Fi downloads and automatic installation are enabled by default. Checks run on app launch, every 15 minutes while the app is open, and about every six hours in the background; Android may delay background work. Automatic download requires the active network to be validated, unmetered Wi-Fi. If another VPN hides that transport, use **Download update** manually.
+Automatic checks, Wi-Fi downloads and automatic installation are enabled by default. Checks run on app launch, every 15 minutes while the app is open, and about every six hours in the background; Android may delay background work. Automatic checks wait while a verified update is ready to install. **Check now** explicitly checks again. Automatic download requires the active network to be validated, unmetered Wi-Fi. If another VPN hides that transport, use **Download update** manually.
 
 From version 0.1.3, APKs of at least 4 MiB use up to four parallel range connections when the server supports them. **Updates** shows the downloaded amount, speed, remaining time and active connections. **Pause download** keeps saved parts and stays paused across app restarts and automatic checks; **Resume download** continues missing ranges. Transient failures receive bounded retries. Servers without range support use a single connection, and changing range support safely restarts that transfer. Connection parallelism can improve a limited single connection; total network or server limits still apply.
 

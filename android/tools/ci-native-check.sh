@@ -21,13 +21,16 @@ trap collect_evidence EXIT
 test -f "$project/app/src/androidTest/java/app/autopilot/android/NativeCoreConfigTest.java"
 test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateDownloadRuntimeTest.java"
 test -f "$project/app/src/androidTest/java/app/autopilot/android/VpnStatusUiTest.java"
+test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateStatusUiTest.java"
+test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateCacheRuntimeTest.java"
+test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateHttpsTransportRuntimeTest.java"
 adb wait-for-device
 adb logcat -c
 
 set +e
 gradle -p "$project" --no-daemon --console=plain \
   :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest,app.autopilot.android.UpdateDownloadRuntimeTest,app.autopilot.android.VpnStatusUiTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest,app.autopilot.android.UpdateDownloadRuntimeTest,app.autopilot.android.VpnStatusUiTest,app.autopilot.android.UpdateStatusUiTest,app.autopilot.android.UpdateCacheRuntimeTest \
   2>&1 | tee "$results/native-core-gradle.log"
 gradle_status=${PIPESTATUS[0]}
 set -e
@@ -48,6 +51,12 @@ selected = {
         "interruptedPrefixesResumeAcrossDownloaderInstances",
     },
     "app.autopilot.android.VpnStatusUiTest": {"connectionProgressAndActiveNodeRenderTruthfully"},
+    "app.autopilot.android.UpdateStatusUiTest": {
+        "checkClicksRenderProgressErrorsAndReleaseActions",
+        "readyUpdateSkipsAutomaticChecksAndKeepsInstallEnabled",
+        "missingReadyApkInvalidatesCacheAndEnablesDownload",
+    },
+    "app.autopilot.android.UpdateCacheRuntimeTest": {"canonicalAliasCleanupKeepsCompleteApkAndLeavesResumeFiles"},
 }
 cases = []
 for report in root.rglob("*.xml"):
@@ -79,4 +88,5 @@ xml_status=${PIPESTATUS[0]}
 set -e
 if [[ "$gradle_status" -ne 0 ]]; then exit "$gradle_status"; fi
 if [[ "$xml_status" -ne 0 ]]; then exit "$xml_status"; fi
+node "$project/tools/ci-update-route-check.cjs" 2>&1 | tee "$results/update-https-runner.log"
 node "$project/tools/ci-tunnel-check.cjs" "$project" 2>&1 | tee "$results/tunnel-runner.log"
