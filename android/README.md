@@ -2,6 +2,8 @@
 
 Native Android client for Autopilot. Requires Android 8.0 or later; includes ARM64, ARMv7 and x86_64. The Windows application is independent.
 
+Version 0.1.5 shows the actual connection stage and completed node checks during startup. An active node stays visible during background tests, and idle Auto/Pinned detail returns after the checks finish. "Ready to connect" is reserved for a stopped connection with cached nodes. The real Android Activity rendering probe is documented in [ANDROID_015_RECEIPTS.md](ANDROID_015_RECEIPTS.md).
+
 Version 0.1.4 replaces the Android tunnel's mixed TCP handling with the userspace gVisor stack. The mixed stack's kernel TCP forwarder conflicted with Autopilot's own UID being excluded from the VPN: node checks passed while other apps' TCP connections timed out. The failing separate-UID test and the same test's restored IPv4/IPv6 traffic are recorded in [the investigation receipt](ANDROID_014_RECEIPTS.md).
 
 Android's DNS bootstrap, encrypted resolvers, fake-IP filters and IPv4 resolution policy now match the desktop app. The previous Android configuration used different resolvers, including a single Cloudflare resolver for every VPN server hostname. Node checks distinguish untested nodes from failures and copied diagnostics include safe DNS/network observations. Old core failures are labelled historical after a successful start. See [the DNS comparison](ANDROID_DNS_PARITY_RECEIPTS.md), [health diagnostics](ANDROID_HEALTH_DIAGNOSTICS_RECEIPTS.md), and [device tunnel probe](ANDROID_TUN_RUNTIME_RECEIPTS.md) for verification boundaries.
