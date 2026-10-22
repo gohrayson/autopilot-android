@@ -87,7 +87,10 @@ calling the ordinary `InetAddress.getAllByName`; there is no guessed startup del
 result records UID, network handle, VPN/blocked state, process importance and background
 restriction status. Probe failure also captures `dumpsys connectivity`, `netpolicy`,
 activity process state and the probe package's UID/permissions in the hosted artifacts.
-This updated foreground probe has not been executed on Android at this handoff.
+The coordinating run subsequently executed this probe successfully on Android API 35:
+[run 39705698643](https://github.com/gohrayson/autopilot-android/actions/runs/39705698643),
+source `b623dd51f50b26031dc261b8e65fb41a809adc67`. The full failing/passing
+comparison and verbatim runtime receipts are in [ANDROID_014_RECEIPTS.md](ANDROID_014_RECEIPTS.md).
 
 The fixture records and rejects Android's optional DNS-over-TLS attempts to exactly
 `172.19.0.2:853`. Those expected rejections do not fail the runner. Every other unexpected
