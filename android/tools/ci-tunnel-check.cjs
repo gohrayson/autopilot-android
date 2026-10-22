@@ -13,6 +13,13 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let serial, fixture, instrumentation;
 async function adb(...args) { return (await execute('adb', ['-s', serial, ...args], { timeout: 180000, maxBuffer: 8 * 1024 * 1024, windowsHide: true })).stdout; }
 async function readPrivate(name) { try { return await adb('shell', 'run-as', app, 'cat', 'files/' + name); } catch { return ''; } }
+async function captureProbePolicy() {
+  if(!serial)return;
+  for(const [name,command] of [['probe-connectivity.txt',['dumpsys','connectivity']],['probe-netpolicy.txt',['dumpsys','netpolicy']],
+    ['probe-uid-state.txt',['dumpsys','activity','processes']],['probe-package.txt',['dumpsys','package','app.autopilot.probe']]]){
+    try{await fs.writeFile(path.join(output,name),await adb('shell',...command));}catch(error){await fs.writeFile(path.join(output,name),String(error));}
+  }
+}
 async function main() {
   if (process.platform !== 'linux' || process.env.GITHUB_ACTIONS !== 'true') throw new Error('This harness runs only on disposable GitHub Linux emulators.');
   await fs.mkdir(output, { recursive: true });
@@ -49,7 +56,10 @@ async function main() {
     replies.push(reply);process.stdout.write(reply);
     await fs.writeFile(path.join(output, 'tunnel-other-uid.log'), replies.join('\n'));
     const uid = /uid=(\d+)/.exec(reply);
-    if (!/result=PASS/.test(reply) || !uid || Number(uid[1]) === ready.uid) throw new Error('Separate UID TUN request failed: ' + reply);
+    if (!/result=PASS/.test(reply) || !uid || Number(uid[1]) === ready.uid) {
+      await captureProbePolicy();throw new Error('Separate UID TUN request failed: ' + reply);
+    }
+    if(!/network=handle=\d+,vpn=true,blocked=false/.test(reply))throw new Error('Probe did not observe an unblocked VPN network: '+reply);
     if (url.includes('fakeip-fixture.autopilot.test')) {
       const resolved = /resolved=([^\r\n]+)/.exec(reply)?.[1].trim().split(',') ?? [];
       if (resolved.length === 0 || !resolved.every(address => {
@@ -67,7 +77,7 @@ async function main() {
   }
   if (!fixture.state.connections.some(connection => connection.host === 'fakeip-fixture.autopilot.test')) throw new Error('Native fake-IP reverse mapping did not restore the hostname at the SOCKS outbound.');
   if (queries.some(query => query.name === 'fakeip-fixture.autopilot.test')) throw new Error('Unfiltered fake-IP domain unexpectedly reached the real DNS fixture.');
-  if (fixture.state.markerHits < 5 || fixture.state.rejectedConnections !== 0) throw new Error('Incomplete fixture traffic receipt.');
+  if (fixture.state.markerHits < 5 || fixture.state.unexpectedDestinations.length !== 0) throw new Error('Incomplete fixture traffic receipt.');
   await adb('shell', 'run-as', app, 'sh', '-c', "'printf PASS > files/tunnel-probe-complete'");
   const status = await completion;
   await fs.writeFile(path.join(output, 'tunnel-instrumentation.log'), log);

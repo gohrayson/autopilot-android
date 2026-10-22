@@ -37,7 +37,7 @@ node --test android/tools/ci-tunnel-fixture.test.cjs
 Verbatim runner tail (2026-10-22):
 
 ```text
-✔ hosted TUN fixture resolves fixed DNS names and serves reserved IPv4/IPv6 and domain SOCKS markers (112.0203ms)
+✔ hosted TUN fixture resolves fixed DNS names and serves reserved IPv4/IPv6 and domain SOCKS markers (112.6639ms)
 ℹ tests 1
 ℹ suites 0
 ℹ pass 1
@@ -45,7 +45,7 @@ Verbatim runner tail (2026-10-22):
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 156.2643
+ℹ duration_ms 155.6248
 ```
 
 ## Hosted runtime invocation
@@ -73,3 +73,23 @@ and the existing logcat/device/JUnit outputs.
 Hosted runtime has not been executed at this handoff. The orchestrator owns the combined
 Android compilation, workflow upload, hosted execution and subsequent runtime receipts.
 No claim of a working device TUN is made from the fixture self-test.
+
+## Foreground UID network-policy readiness
+
+Hosted run `39704959404` established IPv4 and IPv6 marker traffic after the native stack
+change, then the domain request failed immediately. The collected resolver log reported
+`network access blocked` for the isolated probe UID before the fixture received an
+application DNS question. This does not establish a native DNS failure.
+
+The probe APK now launches a visible `ProbeActivity` and registers a default network
+callback. It waits for an actual VPN network and `onBlockedStatusChanged(false)` before
+calling the ordinary `InetAddress.getAllByName`; there is no guessed startup delay. Each
+result records UID, network handle, VPN/blocked state, process importance and background
+restriction status. Probe failure also captures `dumpsys connectivity`, `netpolicy`,
+activity process state and the probe package's UID/permissions in the hosted artifacts.
+This updated foreground probe has not been executed on Android at this handoff.
+
+The fixture records and rejects Android's optional DNS-over-TLS attempts to exactly
+`172.19.0.2:853`. Those expected rejections do not fail the runner. Every other unexpected
+SOCKS destination still fails the runtime gate. The local fixture test above verifies both
+the expected DoT classification and the separate unexpected-destination classification.

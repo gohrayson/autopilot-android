@@ -1,5 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
-    <application android:label="Autopilot tunnel probe" android:allowBackup="false" android:usesCleartextTraffic="true" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <application android:label="Autopilot tunnel probe" android:allowBackup="false" android:usesCleartextTraffic="true">
+        <activity android:name=".ProbeActivity" android:exported="false" />
+    </application>
     <instrumentation android:name=".TunnelProbe" android:targetPackage="app.autopilot.probe" android:functionalTest="true" />
 </manifest>

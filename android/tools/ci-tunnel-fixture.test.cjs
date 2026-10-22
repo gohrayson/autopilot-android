@@ -16,7 +16,7 @@ function dnsQuery(name, port) {
     socket.send(query, port, '127.0.0.1');
   });
 }
-function socksRequest(address, port, denied = false) {
+function socksRequest(address, port, denied = false, destinationPort = 80) {
   return new Promise((resolve, reject) => {
     const socket = net.connect(port, '127.0.0.1');let stage = 0, buffer = Buffer.alloc(0);
     socket.setTimeout(3000, () => socket.destroy(new Error('SOCKS fixture timeout')));socket.once('error', reject);
@@ -25,7 +25,7 @@ function socksRequest(address, port, denied = false) {
       buffer = Buffer.concat([buffer, chunk]);
       if (stage === 0 && buffer.length >= 2) {
         assert.deepEqual([...buffer.subarray(0, 2)], [5, 0]);buffer = buffer.subarray(2);stage = 1;
-        socket.write(Buffer.concat([Buffer.from([5, 1, 0]), address, Buffer.from([0, 80])]));
+        socket.write(Buffer.concat([Buffer.from([5, 1, 0]), address, Buffer.from([destinationPort >> 8, destinationPort & 255])]));
       }
       if (stage === 1 && buffer.length >= 10) {
         if (denied) { assert.equal(buffer[1], 2);socket.destroy();resolve('DENIED');return; }
@@ -50,6 +50,9 @@ test('hosted TUN fixture resolves fixed DNS names and serves reserved IPv4/IPv6 
   const domain = await socksRequest(Buffer.concat([Buffer.from([3, hostname.length]), hostname]), 39480);
   for (const result of [ipv4, ipv6, domain]) { assert.match(result, /^HTTP\/1.1 200 OK/);assert.ok(result.endsWith(fixture.state.marker + '\n')); }
   assert.equal(await socksRequest(Buffer.from([1, 1, 1, 1, 1]), 39480, true), 'DENIED');
-  assert.equal(fixture.state.markerHits, 3);assert.equal(fixture.state.rejectedConnections, 1);assert.equal(fixture.state.dnsQueries.length, 3);
+  assert.equal(await socksRequest(Buffer.from([1, 172, 19, 0, 2]), 39480, true, 853), 'DENIED');
+  assert.equal(fixture.state.markerHits, 3);assert.equal(fixture.state.rejectedConnections, 2);assert.equal(fixture.state.dnsQueries.length, 3);
+  assert.deepEqual(fixture.state.expectedPrivateDnsProbes, [{ host: '172.19.0.2', port: 853 }]);
+  assert.deepEqual(fixture.state.unexpectedDestinations, [{ host: '1.1.1.1', port: 80 }]);
   assert.ok(fixture.state.connections.some(connection => connection.host === 'fakeip-fixture.autopilot.test'));
 });

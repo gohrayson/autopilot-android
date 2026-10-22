@@ -10,7 +10,7 @@ async function startFixture(output, options = {}) {
   const socksPort = options.socksPort ?? 29480;
   const dnsPort = options.dnsPort ?? 29553;
   const state = { marker: 'AUTOPILOT_TUNNEL_OK_' + crypto.randomBytes(12).toString('hex'), socksPort, dnsPort,
-    markerHits: 0, connections: [], dnsQueries: [], rejectedConnections: 0 };
+    markerHits: 0, connections: [], dnsQueries: [], rejectedConnections: 0, expectedPrivateDnsProbes: [], unexpectedDestinations: [] };
   const sockets = new Set();
   function save() {
     if (!output) return;
@@ -39,6 +39,11 @@ async function startFixture(output, options = {}) {
         else return client.destroy();
         const port = buffer.readUInt16BE(end - 2);
         if (buffer[0] !== 5 || buffer[1] !== 1 || port !== 80 || !markerHosts.has(host)) {
+          const destination={ host, port };
+          // Android probes opportunistic DNS-over-TLS against the advertised VPN DNS.
+          // We deliberately reject it, so the OS uses the actual plain DNS path under test.
+          if(buffer[0]===5&&buffer[1]===1&&host==='172.19.0.2'&&port===853)state.expectedPrivateDnsProbes.push(destination);
+          else state.unexpectedDestinations.push(destination);
           state.rejectedConnections++;save();client.end(Buffer.from([5, 2, 0, 1, 0, 0, 0, 0, 0, 0]));return;
         }
         state.connections.push({ host, port });save();
