@@ -19,6 +19,8 @@ public final class VpnEngine {
     private final ServiceChecks checks=new ServiceChecks();
     private final AtomicBoolean running=new AtomicBoolean(),stopping=new AtomicBoolean(),sweepQueued=new AtomicBoolean(),preferencesQueued=new AtomicBoolean(),nodesQueued=new AtomicBoolean();
     private final Map<String,SelectionPolicy.Health> health=new HashMap<>();
+    private final Map<String,HealthDiagnostics.Latency> latencyDiagnostics=new HashMap<>();
+    private final HealthDiagnostics.NetworkSignals networkSignals=new HealthDiagnostics.NetworkSignals();
     private final Map<String,Integer> ports=new HashMap<>();
     private final AtomicLong sequence=new AtomicLong();
     private final Object operationLock=new Object();
@@ -55,7 +57,7 @@ public final class VpnEngine {
             app.recordBaselineDiagnostic(CoreDiagnostics.baselineDiagnostic(baseline,home.getAbsolutePath(),baselineProfile,baselineInit,baselineSetup));
             throw new IOException(diagnostic.code);
         }
-        baselineAccepted=true;app.log("core","CORE_BASELINE_ACCEPTED");
+        baselineAccepted=true;app.recordCoreAccepted(CoreDiagnostics.Stage.BASELINE);app.log("core","CORE_BASELINE_ACCEPTED");
         ProfileValidation.Result profile=validateProfile(validatedNodes(),"",CoreDiagnostics.Stage.PROFILE);
         if(!profile.accepted)throw new IOException(rejectionCode(profile));
         // Core events are inspected only for the TUN lifecycle. Arbitrary upstream log text is never persisted.
@@ -82,7 +84,7 @@ public final class VpnEngine {
             if(!record(target).qualified(now())){error="NODE_NOT_HEALTHY";detail="Selected node did not pass the service checks";return;}
             if(pin)pinned=target.id;else pinned="";
             if(current==null||!current.id.equals(target.id))promote(target,true);
-            else{phase="connected";error="";detail=pin?"Pinned node":"Automatic selection";}
+            else{phase="connected";error="";detail=connectedDetail();}
         }finally{busy=false;publish();}
     });}
     public void resumeAuto(){preemptSweep();submit(()->{pinned="";if(!profileUsable||nodes.isEmpty()&&!coreSkipped.isEmpty()){nodesChanged();return;}error="";decide(true);queueSweep(false);publish();});}
@@ -117,7 +119,7 @@ public final class VpnEngine {
                     survivor[0]=null;selectedName[0]="REJECT";nodes=List.of();syncHealth();writeConfig();
                     String recovery=quickSetup("REJECT");
                     if(!"".equals(recovery))app.recordCoreDiagnostic(CoreDiagnostics.classify(recovery,List.of()),CoreDiagnostics.Stage.RECOVERY,coreSkipped.size());
-                    else app.log("core","CORE_RECOVERY_ACCEPTED");
+                    else{app.recordCoreAccepted(CoreDiagnostics.Stage.RECOVERY);app.log("core","CORE_RECOVERY_ACCEPTED");}
                     return "".equals(recovery);
                 }
                 @Override public void attach()throws Exception{
@@ -159,7 +161,7 @@ public final class VpnEngine {
             coreSkipped=skipped;app.recordCoreDiagnostic(diagnostic,stage,skipped.size());publish();
         });
         coreSkipped=result.skipped;nodes=result.nodes;syncHealth();
-        if(result.accepted)app.log("core","CORE_PROFILE_ACCEPTED");
+        if(result.accepted){app.recordCoreAccepted(stage);app.log("core","CORE_PROFILE_ACCEPTED");}
         return result;
     }
     private static String rejectionCode(ProfileValidation.Result profile){return profile.limitReached?CoreDiagnostics.Kind.PROXY_LIMIT.code:profile.lastDiagnostic==null?"CORE_CONFIG_REJECTED":profile.lastDiagnostic.code;}
@@ -176,7 +178,7 @@ public final class VpnEngine {
         try{job.run();}
         catch(InterruptedException interrupted){Thread.interrupted();
             if(running.get()&&!preempted)failure("CHECK_CANCELLED");
-            else if(running.get()){busy=false;detail=current==null?"Applying latest selection":"Automatic selection";publish();}
+            else if(running.get()){busy=false;detail=current==null?"Applying latest selection":connectedDetail();publish();}
         }
         catch(Throwable exception){if(running.get()){
             String code=exception instanceof TimeoutException?"CORE_TIMEOUT":nativeReady?"VPN_OPERATION_FAILED":"CORE_UNAVAILABLE";
@@ -229,9 +231,11 @@ public final class VpnEngine {
                 ArrayList<CompletableFuture<JSONObject>> pending=new ArrayList<>();
                 for(Node n:batch)pending.add(actionAsync("testDelay",new JSONObject().put("proxy-name",n.name).put("test-url","https://www.gstatic.com/generate_204").put("timeout",5000).toString()));
                 for(int i=0;i<batch.size();i++){
-                    int latency=-1;
-                    try{JSONObject r=await(pending.get(i),7500);if(r.optInt("code",-1)==0)latency=r.optInt("data",-1);}catch(TimeoutException|ExecutionException ignored){}
-                    record(batch.get(i)).latency(latency,now());
+                    HealthDiagnostics.Latency result;
+                    try{result=HealthDiagnostics.latency(await(pending.get(i),7500));}
+                    catch(TimeoutException ignored){result=HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CHECK_TIMEOUT);}
+                    catch(ExecutionException ignored){result=HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CORE_RESPONSE_FAILED);}
+                    recordLatency(batch.get(i),result);
                     if(current!=null&&current.id.equals(batch.get(i).id))lastCurrentCheck=now();
                 }
                 // A long provider list must not starve the active node's 15-second watchdog.
@@ -267,7 +271,8 @@ public final class VpnEngine {
         SelectionPolicy.Health active=current==null?null:record(current);
         if(SelectionPolicy.shouldSwitch(active,best,app.preferred(),now(),lastSwitch,force)){
             Node candidate=findById(best.id);if(candidate==null)return;
-            // The actual promotion always rechecks the same service path the user will use.
+            // Recheck this node's explicit mixed listener. This verifies its outbound,
+            // independently of the separate Android TUN path used by other apps.
             if(now()-best.servicesAt>30_000){probeServices(candidate);if(!best.qualified(now()))return;}
             boolean unhealthy=active==null||!active.qualified(now());promote(candidate,unhealthy);
         }
@@ -276,7 +281,7 @@ public final class VpnEngine {
         action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name",node.name).toString(),5000);
         verifySelector(node.name);
         if(closeExisting)action("closeAllConnections",null,5000);
-        current=node;lastSwitch=now();lastCurrentCheck=now();phase="connected";error="";detail=pinned.isEmpty()?"Automatic selection":"Pinned node";
+        current=node;lastSwitch=now();lastCurrentCheck=now();phase="connected";error="";detail=connectedDetail();
         app.log("selection",closeExisting?"NODE_SWITCH":"HEALTHY_UPGRADE");publish();
     }
     private void verifySelector(String name)throws Exception{
@@ -286,9 +291,14 @@ public final class VpnEngine {
         if(!name.equals(group.optString("now")))throw new IOException("SELECTOR_MISMATCH");
     }
     private void probeLatency(Node n)throws Exception{
-        JSONObject response=action("testDelay",new JSONObject().put("proxy-name",n.name).put("test-url","https://www.gstatic.com/generate_204").put("timeout",5000).toString(),7500);
-        record(n).latency(response.optInt("data",-1),now());
+        HealthDiagnostics.Latency result;
+        try{result=HealthDiagnostics.latency(await(actionAsync("testDelay",new JSONObject().put("proxy-name",n.name).put("test-url","https://www.gstatic.com/generate_204").put("timeout",5000).toString()),7500));}
+        catch(TimeoutException ignored){result=HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CHECK_TIMEOUT);}
+        catch(ExecutionException ignored){result=HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CORE_RESPONSE_FAILED);}
+        recordLatency(n,result);
     }
+    private void recordLatency(Node node,HealthDiagnostics.Latency result){record(node).latency(result.millis,now());latencyDiagnostics.put(node.id,result);}
+    private String connectedDetail(){return "Node connection checks passed · "+(pinned.isEmpty()?"Auto":"Pinned");}
     private void probeServices(Node n)throws InterruptedException{
         Integer port=ports.get(n.id);if(port==null)return;
         ServiceChecks.Result r=checks.check(port);SelectionPolicy.Health h=record(n);
@@ -328,23 +338,23 @@ public final class VpnEngine {
             JSONObject log=message.optJSONObject("data");if(log==null)return;
             String text=log.optString("Payload");CompletableFuture<Boolean> started=tunStarted;
             if(started!=null){if(text.startsWith("TUN started:"))started.complete(true);else if(text.startsWith("TUN start failed:"))started.complete(false);}
+            // The bridge's log subscription uses the profile's info threshold,
+            // independent of its error-only logcat sink. Keep only fixed codes.
+            networkSignals.observe(log.optString("LogLevel"),text,now());
         }catch(JSONException ignored){}
     }
     private JSONObject selected(String name)throws JSONException{return new JSONObject().put("selected-map",new JSONObject().put("AUTOPILOT",name));}
     static JSONObject configuration(List<Node> nodes,Map<String,Integer> ports)throws Exception{
+        return configuration(nodes,ports,CoreDnsConfig.DEFAULT);
+    }
+    static JSONObject configuration(List<Node> nodes,Map<String,Integer> ports,CoreDnsConfig dnsPolicy)throws Exception{
         ports.clear();JSONArray proxies=new JSONArray(),names=new JSONArray().put("REJECT"),listeners=new JSONArray();
         int port=27000;
         for(Node n:nodes){proxies.put(new JSONObject(n.config.toString()));names.put(n.name);ports.put(n.id,port);
             listeners.put(new JSONObject().put("name","autopilot-"+port).put("type","mixed").put("listen","127.0.0.1").put("port",port++).put("proxy",n.name).put("udp",true));}
-        JSONObject dns=new JSONObject().put("enable",true).put("listen","127.0.0.1:0").put("ipv6",true)
-            .put("enhanced-mode","fake-ip").put("fake-ip-range","198.18.0.1/16")
-            .put("default-nameserver",new JSONArray().put("1.1.1.1").put("8.8.8.8"))
-            // Bootstrap and per-node probe DNS must work before AUTOPILOT has a verified node.
-            // These encrypted resolver sockets belong to our excluded/protected UID.
-            .put("nameserver",new JSONArray().put("https://1.1.1.1/dns-query").put("https://8.8.8.8/dns-query"))
-            .put("proxy-server-nameserver",new JSONArray().put("https://1.1.1.1/dns-query"));
+        JSONObject dns=dnsPolicy.build();
         return new JSONObject().put("mode","rule").put("log-level","info").put("allow-lan",false).put("bind-address","127.0.0.1")
-            .put("ipv6",true).put("find-process-mode","off").put("profile",new JSONObject().put("store-selected",false).put("store-fake-ip",false))
+            .put("ipv6",CoreDnsConfig.IPV6_ENABLED).put("find-process-mode","off").put("profile",new JSONObject().put("store-selected",false).put("store-fake-ip",false))
             .put("dns",dns).put("tun",new JSONObject().put("enable",false)).put("proxies",proxies)
             .put("proxy-groups",new JSONArray().put(new JSONObject().put("name","AUTOPILOT").put("type","select").put("proxies",names)))
             .put("listeners",listeners).put("rules",new JSONArray().put("MATCH,AUTOPILOT"));
@@ -383,7 +393,7 @@ public final class VpnEngine {
         return List.copyOf(result);
     }
     private boolean sameNodes(List<Node> a,List<Node>b){if(a.size()!=b.size())return false;for(int i=0;i<a.size();i++)if(!a.get(i).id.equals(b.get(i).id))return false;return true;}
-    private void syncHealth(){HashSet<String> ids=new HashSet<>();for(Node n:nodes){ids.add(n.id);health.computeIfAbsent(n.id,k->new SelectionPolicy.Health(n.id,n.name,n.country));}health.keySet().retainAll(ids);}
+    private void syncHealth(){HashSet<String> ids=new HashSet<>();for(Node n:nodes){ids.add(n.id);health.computeIfAbsent(n.id,k->new SelectionPolicy.Health(n.id,n.name,n.country));}health.keySet().retainAll(ids);latencyDiagnostics.keySet().retainAll(ids);}
     private SelectionPolicy.Health record(Node n){return health.get(n.id);}
     private Node findById(String id){for(Node n:nodes)if(n.id.equals(id))return n;return null;}
     private Node findByName(String name){for(Node n:nodes)if(n.name.equals(name))return n;return null;}
@@ -392,14 +402,22 @@ public final class VpnEngine {
         try{
             JSONArray rows=new JSONArray();ArrayList<SelectionPolicy.Health> ordered=new ArrayList<>(health.values());ordered.sort(SelectionPolicy.order(app.preferred()));
             for(SelectionPolicy.Health h:ordered){Node n=findById(h.id);if(n==null)continue;
-                rows.put(new JSONObject().put("name",h.name).put("country",h.country).put("provider",n.provider).put("latency",h.latency)
+                HealthDiagnostics.Latency diagnostic=latencyDiagnostics.get(h.id);
+                JSONObject row=new JSONObject().put("name",h.name).put("country",h.country).put("provider",n.provider).put("latency",h.latency)
                     .put("score",h.score()==Integer.MAX_VALUE?-1:h.score()).put("claude",h.claude).put("chatgpt",h.chatgpt).put("gemini",h.gemini)
-                    .put("status",current!=null&&current.id.equals(h.id)?"Active":h.qualified(now())?"Ready":h.latency<=0?"Unavailable":"Needs checks"));}
+                    .put("latencyAt",h.latencyAt).put("servicesAt",h.servicesAt).put("latencyFresh",h.latencyFresh(now())).put("qualified",h.qualified(now()))
+                    .put("latencyCode",diagnostic==null?HealthDiagnostics.LatencyCode.NOT_TESTED.name():diagnostic.code.name())
+                    .put("status",current!=null&&current.id.equals(h.id)?"Active":h.latencyAt==0?"Not tested":h.qualified(now())?"Ready":h.latency<=0?"Unavailable":!h.latencyFresh(now())?"Check expired":h.servicesAt==0?"Needs checks":now()<h.servicesAt||now()-h.servicesAt>SelectionPolicy.SERVICE_TTL?"Service check expired":"Service check failed");
+                if(diagnostic!=null&&diagnostic.nativeCode!=null)row.put("latencyNativeCode",diagnostic.nativeCode);
+                rows.put(row);}
             JSONArray skipped=new JSONArray();for(ProfileValidation.Skipped entry:coreSkipped)skipped.put(entry.json());
             JSONObject snapshot=new JSONObject().put("phase",phase).put("current",current==null?"":current.name).put("pinned",!pinned.isEmpty())
                 .put("auto",pinned.isEmpty()).put("busy",busy).put("error",error).put("detail",detail).put("lastSwitch",lastSwitch).put("nodes",rows).put("tun",tunReady);
             snapshot.put("coreBaselineAccepted",baselineAccepted).put("skippedCount",coreSkipped.size()).put("skippedNodes",skipped);
+            snapshot.put("coreProfileAccepted",profileUsable).put("nodeHealth",HealthDiagnostics.providers(rows)).put("networkSignals",networkSignals.json())
+                .put("checkPath","per-node mixed listener; excluded Autopilot UID").put("resolverPolicy",CoreDnsConfig.POLICY_ID);
             JSONObject diagnostic=app.coreDiagnostic();if(diagnostic!=null)snapshot.put("coreDiagnostic",diagnostic);
+            JSONObject historical=app.historicalCoreDiagnostic();if(historical!=null)snapshot.put("lastCoreFailure",historical);
             app.publish(snapshot);service.updateNotification(current==null?detail:current.name+(pinned.isEmpty()?" · Auto":" · Pinned"));
         }catch(JSONException ignored){}
     }

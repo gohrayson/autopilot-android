@@ -112,6 +112,8 @@ public final class MainActivity extends Activity {
             TextView label=addText(line,(name.equals(current)?"●  ":"")+name,16,INK);label.setTypeface(null,Typeface.BOLD);
             int latency=node.optInt("latency",-1);
             addText(line,node.optString("provider")+" · "+node.optString("country")+" · "+(latency>0?latency+" ms":node.optString("status","Not tested")),13,MUTED);
+            String checkMessage=HealthDiagnostics.latencyMessage(node.optString("latencyCode","NOT_TESTED"));
+            if(!checkMessage.isEmpty()&&node.optLong("latencyAt")>0)addText(line,checkMessage,12,MUTED);
             String checks="Claude "+mark(node.optString("claude"))+"    ChatGPT "+mark(node.optString("chatgpt"))+"    Gemini "+mark(node.optString("gemini"));
             addText(line,checks,12,MUTED);line.setOnClickListener(v->{if(app.engine!=null){app.engine.select(name,false);toast("Checking node before switching…");}else toast("Start the VPN first");});
             line.setOnLongClickListener(v->{if(app.engine!=null)new AlertDialog.Builder(this).setTitle("Pin this node?").setMessage("Autopilot will hold this node until you Resume Auto. It can still recover if the node stops working.").setPositiveButton("Pin",(d,w)->app.engine.select(name,true)).setNegativeButton("Cancel",null).show();return true;});

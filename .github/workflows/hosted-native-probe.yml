@@ -1,4 +1,4 @@
-name: Android native and download runtime probes
+name: Android native, download and TUN runtime probes
 
 on:
   workflow_dispatch:
@@ -64,7 +64,7 @@ jobs:
           printf '%s  %s\n' '01bc41748840c8200bbaf08c044ba8704e35303a3179b75a3cce8517c8944251' "$aar" | sha256sum --check | tee ci-native-results/native-aar-sha256.txt
           sdkmanager 'platforms;android-35' 'build-tools;35.0.0' > ci-native-results/sdk-install.log 2>&1
           gradle -p "$AUTOPILOT_ANDROID_DIR" --no-daemon --console=plain \
-            :app:assembleDebug :app:assembleDebugAndroidTest 2>&1 | tee ci-native-results/build.log
+            :app:assembleDebug :app:assembleDebugAndroidTest :probe:assembleDebug 2>&1 | tee ci-native-results/build.log
       - name: Enable KVM on disposable hosted runner
         shell: bash
         run: |
@@ -74,7 +74,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           test -r /dev/kvm && test -w /dev/kvm
           ls -l /dev/kvm | tee ci-native-results/kvm.txt
-      - name: Run native baseline and multipart download instrumentation
+      - name: Run native baseline, multipart download and separate UID TUN instrumentation
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35

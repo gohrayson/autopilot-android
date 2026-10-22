@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fresh hosted emulator only. Synthetic native/update probes; no account, provider API or TUN.
+# Fresh hosted emulator only. Synthetic native/update/TUN probes; no provider account or API.
 set -Eeuo pipefail
 
 project="$(cd "${1:-.}" && pwd)"
@@ -76,4 +76,5 @@ PY
 xml_status=${PIPESTATUS[0]}
 set -e
 if [[ "$gradle_status" -ne 0 ]]; then exit "$gradle_status"; fi
-exit "$xml_status"
+if [[ "$xml_status" -ne 0 ]]; then exit "$xml_status"; fi
+node "$project/tools/ci-tunnel-check.cjs" "$project" 2>&1 | tee "$results/tunnel-runner.log"

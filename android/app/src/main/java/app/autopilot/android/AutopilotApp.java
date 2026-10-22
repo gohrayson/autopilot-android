@@ -20,6 +20,7 @@ public final class AutopilotApp extends Application {
     private volatile JSONObject snapshot = new JSONObject();
     private volatile String nodeFingerprint="";
     private volatile JSONObject lastCoreDiagnostic;
+    private volatile JSONObject currentCoreDiagnostic;
     private SharedPreferences prefs;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
@@ -62,17 +63,23 @@ public final class AutopilotApp extends Application {
         providerExecutor.execute(()->{try{providers.refreshFailedNodes(copy,preferred());}catch(ProviderException ex){log("provider",ex.code);}});
     }
     public JSONObject state(){return snapshot;}
-    public JSONObject coreDiagnostic(){JSONObject saved=lastCoreDiagnostic;return saved==null?null:CoreDiagnostics.restore(saved);}
+    /** Persisted failures are history until a current run reports another rejection. */
+    public JSONObject coreDiagnostic(){JSONObject saved=currentCoreDiagnostic;return saved==null?null:CoreDiagnostics.restore(saved);}
+    public JSONObject historicalCoreDiagnostic(){JSONObject saved=lastCoreDiagnostic;return saved==null?null:CoreDiagnostics.restore(saved);}
+    public void recordCoreAccepted(CoreDiagnostics.Stage stage){
+        JSONObject current=currentCoreDiagnostic;
+        if(stage!=CoreDiagnostics.Stage.BASELINE||current!=null&&"baseline".equals(current.optString("stage")))currentCoreDiagnostic=null;
+    }
     public void recordCoreDiagnostic(CoreDiagnostics.Diagnostic diagnostic,CoreDiagnostics.Stage stage,int skippedCount){
         JSONObject safe=diagnostic.json();try{safe.put("stage",stage.value).put("at",System.currentTimeMillis()).put("skippedCount",Math.max(0,Math.min(ProfileValidation.MAX_DROPS,skippedCount)));}catch(JSONException ignored){}
-        lastCoreDiagnostic=safe;prefs.edit().putString("coreDiagnostic",safe.toString()).apply();
+        currentCoreDiagnostic=safe;lastCoreDiagnostic=safe;prefs.edit().putString("coreDiagnostic",safe.toString()).apply();
         log("core-"+stage.value,diagnostic.logCode());changed();
     }
     public void recordBaselineDiagnostic(JSONObject diagnostic){
         JSONObject safe=CoreDiagnostics.restore(diagnostic);
         if(safe==null||!"baseline".equals(safe.optString("stage")))return;
         try{safe.put("at",System.currentTimeMillis()).put("skippedCount",0);}catch(JSONException ignored){}
-        lastCoreDiagnostic=safe;prefs.edit().putString("coreDiagnostic",safe.toString()).apply();
+        currentCoreDiagnostic=safe;lastCoreDiagnostic=safe;prefs.edit().putString("coreDiagnostic",safe.toString()).apply();
         log("core-baseline",safe.optString("code"));changed();
     }
     public void changed(){UpdateManager updater=updates;if(updater!=null)updater.connectionStateChanged();main.post(()->{for(Runnable listener:listeners)listener.run();});}
@@ -90,8 +97,15 @@ public final class AutopilotApp extends Application {
     public String diagnostics(){
         StringBuilder out=new StringBuilder("Autopilot Android "+BuildConfig.VERSION_NAME+"\nAndroid "+android.os.Build.VERSION.RELEASE+" / "+android.os.Build.SUPPORTED_ABIS[0]+"\n");
         JSONObject s=state(); out.append("VPN: ").append(s.optString("phase","idle")).append("\n");
-        out.append("VPN error: ").append(s.optString("error","")).append("\nBaseline accepted: ").append(s.optBoolean("coreBaselineAccepted")).append("\nSkipped nodes: ").append(s.optInt("skippedCount")).append("\n");
-        JSONObject core=coreDiagnostic();if(core!=null)out.append("Last core diagnostic: ").append(core).append("\n");
+        out.append("VPN error: ").append(s.optString("error","")).append("\nBaseline accepted: ").append(s.optBoolean("coreBaselineAccepted"))
+            .append("\nProfile accepted: ").append(s.optBoolean("coreProfileAccepted")).append("\nSkipped nodes: ").append(s.optInt("skippedCount")).append("\n");
+        JSONObject core=coreDiagnostic();out.append("Current core diagnostic: ").append(core==null?"none":core.toString()).append("\n");
+        JSONObject historical=historicalCoreDiagnostic();if(historical!=null)out.append("Last core failure (historical): ").append(historical).append("\n");
+        out.append("Health check path: ").append(s.optString("checkPath","not started")).append("\n")
+            .append("Other-app tunnel traffic: not verified by node checks\n")
+            .append("Resolver policy: ").append(s.optString("resolverPolicy",CoreDnsConfig.POLICY_ID)).append("\n");
+        JSONArray health=s.optJSONArray("nodeHealth");if(health!=null)out.append("Node health: ").append(health).append("\n");
+        JSONObject network=s.optJSONObject("networkSignals");if(network!=null)out.append("Native network observations (session only, not per-node): ").append(network).append("\n");
         if(updates!=null)out.append(updates.diagnostic());
         JSONArray skipped=s.optJSONArray("skippedNodes");if(skipped!=null&&skipped.length()>0)out.append("Skipped diagnostics: ").append(skipped).append("\n");
         for(String p:List.of("onevpn","octohide")){
