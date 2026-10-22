@@ -43,6 +43,9 @@ public final class UpdateStatusUiTest {
         try(Fixture fixture=new Fixture()){
             Gate timeout=fixture.transport.next("timeout",false);
             fixture.open();
+            fixture.assertButtonColors("updateCheck",true,0xffedf2ff,0xff315fea);
+            fixture.assertButtonColors("updateDownload",false,0xffe3e5e9,0xff8b919c);
+            fixture.assertButtonColors("updateInstall",false,0xffe3e5e9,0xff8b919c);
             fixture.click("updateCheck");
             assertTrue(timeout.opened.await(5,TimeUnit.SECONDS));
             assertEquals("checking",fixture.manager.state().optString("phase"));
@@ -51,6 +54,8 @@ public final class UpdateStatusUiTest {
             assertFalse(fixture.enabled("updateCheck"));
             assertFalse(fixture.enabled("updateDownload"));
             assertFalse(fixture.enabled("updateInstall"));
+            fixture.assertButtonColors("updateCheck",false,0xffe3e5e9,0xff8b919c);
+            fixture.assertButtonColors("updateInstall",false,0xffe3e5e9,0xff8b919c);
             fixture.assertSpinner(true);
             assertTrue(fixture.text("updateDialogStatus").contains("Checking for updates…"));
             assertTrue(fixture.text("updateActionHint").contains("Contacting updates.example.org"));
@@ -66,6 +71,7 @@ public final class UpdateStatusUiTest {
             assertTrue(fixture.text("updateDialogStatus").contains("UPDATE_TIMEOUT"));
             assertEquals("Check now",fixture.text("updateCheck"));
             assertTrue(fixture.enabled("updateCheck"));
+            fixture.assertButtonColors("updateCheck",true,0xffedf2ff,0xff315fea);
             fixture.assertSpinner(false);
 
             fixture.transport.next("http",true);
@@ -86,6 +92,8 @@ public final class UpdateStatusUiTest {
             assertTrue(fixture.text("updateDialogStatus").contains("99.0.0-ui is available"));
             assertTrue(fixture.enabled("updateDownload"));
             assertFalse(fixture.enabled("updateInstall"));
+            fixture.assertButtonColors("updateDownload",true,0xffedf2ff,0xff315fea);
+            fixture.assertButtonColors("updateInstall",false,0xffe3e5e9,0xff8b919c);
             assertTrue(fixture.text("updateActionHint").contains("Tap Download update first"));
             assertEquals("Rejected stale action must not add a request",4,fixture.transport.requests.get());
             assertNull("The update UI must never start a VPN",fixture.app.engine);
@@ -110,6 +118,8 @@ public final class UpdateStatusUiTest {
             assertEquals(0,fixture.transport.requests.get());
             assertTrue(fixture.enabled("updateInstall"));
             assertFalse(fixture.enabled("updateDownload"));
+            fixture.assertButtonColors("updateInstall",true,0xff315fea,0xffffffff);
+            fixture.assertButtonColors("updateDownload",false,0xffe3e5e9,0xff8b919c);
             assertTrue(fixture.text("updateActionHint").contains("Automatic checks wait"));
 
             fixture.transport.next("network",true);
@@ -200,6 +210,17 @@ public final class UpdateStatusUiTest {
         void assertSpinner(boolean visible)throws Exception{
             ProgressBar spinner=(ProgressBar)get(activity,"updateProgressBar");
             instrumentation.runOnMainSync(()->{assertEquals(visible,spinner.getVisibility()==View.VISIBLE);if(visible)assertTrue(spinner.isIndeterminate());});
+        }
+        void assertButtonColors(String name,boolean enabled,int background,int text)throws Exception{
+            Button button=(Button)get(activity,name);
+            instrumentation.runOnMainSync(()->{
+                assertEquals("Enabled state for "+name,enabled,button.isEnabled());
+                android.content.res.ColorStateList tint=button.getBackgroundTintList();
+                assertNotNull("Background tint for "+name,tint);assertTrue("Background must react to enabled state",tint.isStateful());
+                assertEquals("Actual background tint for "+name,background,tint.getColorForState(button.getDrawableState(),tint.getDefaultColor()));
+                assertTrue("Text color must react to enabled state",button.getTextColors().isStateful());
+                assertEquals("Actual text color for "+name,text,button.getCurrentTextColor());
+            });
         }
         void awaitIdle()throws Exception{UpdateStatusUiTest.awaitIdle(manager);instrumentation.waitForIdleSync();}
         void assertSafeDiagnostics(){String diagnostic=manager.diagnostic();assertTrue(diagnostic.contains("feed host: updates.example.org"));assertFalse(diagnostic.contains("private-fixture-path"));assertFalse(diagnostic.contains(RAW_SECRET));assertFalse(diagnostic.contains("https://"));}

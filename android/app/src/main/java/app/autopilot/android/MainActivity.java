@@ -23,6 +23,7 @@ import java.util.*;
 /** Native Android UI. Network and account operations always run off the main thread. */
 public final class MainActivity extends Activity {
     private static final int BLUE=0xff315fea, INK=0xff15233c, MUTED=0xff64728b, GREEN=0xff16865d, RED=0xffb53636;
+    private static final int DISABLED_BUTTON_BACKGROUND=0xffe3e5e9, DISABLED_BUTTON_TEXT=0xff8b919c, SECONDARY_BUTTON_BACKGROUND=0xffedf2ff;
     private AutopilotApp app;
     private LinearLayout content, nodeList;
     private TextView phase, selected, detail, countries, oneStatus, octoStatus, nodeSummary, error, updateSummary;
@@ -346,7 +347,13 @@ public final class MainActivity extends Activity {
     private TextView addText(LinearLayout target,String label,int size,int color){TextView text=text(label,size,color);LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);params.bottomMargin=dp(8);target.addView(text,params);return text;}
     private void section(LinearLayout card,String label){TextView text=addText(card,label,18,INK);text.setTypeface(null,Typeface.BOLD);}
     private LinearLayout card(){LinearLayout card=column();card.setPadding(dp(18),dp(18),dp(18),dp(14));card.setBackground(background(Color.WHITE,18));LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);params.topMargin=dp(16);card.setLayoutParams(params);return card;}
-    private Button button(String text,boolean primary){Button button=new Button(this);button.setText(text);button.setAllCaps(false);button.setTextSize(14);button.setTextColor(primary?Color.WHITE:BLUE);button.setMinHeight(dp(46));if(primary){button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(BLUE));}return button;}
+    private Button button(String text,boolean primary){
+        Button button=new Button(this);button.setText(text);button.setAllCaps(false);button.setTextSize(14);button.setMinHeight(dp(46));
+        int[][] states={new int[]{-android.R.attr.state_enabled},new int[]{}};
+        button.setBackgroundTintList(new android.content.res.ColorStateList(states,new int[]{DISABLED_BUTTON_BACKGROUND,primary?BLUE:SECONDARY_BUTTON_BACKGROUND}));
+        button.setTextColor(new android.content.res.ColorStateList(states,new int[]{DISABLED_BUTTON_TEXT,primary?Color.WHITE:BLUE}));
+        return button;
+    }
     private GradientDrawable background(int color,int radius){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));return d;}
     private LinearLayout.LayoutParams full(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2);p.topMargin=dp(8);return p;}
     private int dp(float value){return Math.round(value*getResources().getDisplayMetrics().density);}

@@ -2,6 +2,8 @@
 
 Native Android client for Autopilot. Requires Android 8.0 or later; includes ARM64, ARMv7 and x86_64. The Windows application is independent.
 
+Version 0.1.7 gives disabled buttons a grey background and grey text. Enabled primary actions remain blue and secondary actions use a pale blue background. This makes unavailable Download/Install controls visibly different from actions the user can take.
+
 Version 0.1.6 routes update requests through the active verified VPN node. Without a running Autopilot VPN it connects directly. A running VPN without a verified node reports that the update route is unavailable. Update checks show progress and specific errors; a verified downloaded APK is kept ready instead of being locked behind automatic network checks. Verification evidence is recorded in [ANDROID_016_RECEIPTS.md](ANDROID_016_RECEIPTS.md).
 
 Version 0.1.5 shows the actual connection stage and completed node checks during startup. An active node stays visible during background tests, and idle Auto/Pinned detail returns after the checks finish. "Ready to connect" is reserved for a stopped connection with cached nodes. The real Android Activity rendering probe is documented in [ANDROID_015_RECEIPTS.md](ANDROID_015_RECEIPTS.md).
