@@ -135,44 +135,30 @@ public final class UpdateStatusUiTest {
             assertFalse("The fixture must start without its ready APK",UpdateCache.apk(cache,release.versionCode).exists());
             put(fixture.manager,"available",release);put(fixture.manager,"ready",release);put(fixture.manager,"phase","ready");
             Method progress=UpdateManager.class.getDeclaredMethod("setProgress",UpdateManifest.class,long.class);progress.setAccessible(true);progress.invoke(fixture.manager,release,release.sizeBytes);
-            String appOp="REQUEST_INSTALL_PACKAGES";
-            String previous=appOpMode(shell(fixture.instrumentation,"appops get "+fixture.context.getPackageName()+" "+appOp));
-            try{
-                shell(fixture.instrumentation,"appops set "+fixture.context.getPackageName()+" "+appOp+" allow");
-                assertTrue("Permit only this fresh debug fixture to reach the actual Install click",fixture.app.getPackageManager().canRequestPackageInstalls());
-                java.util.List<Integer> sessions=sessionIds(fixture.app);
-                fixture.open();
-                assertTrue(fixture.enabled("updateInstall"));
-                fixture.click("updateInstall");fixture.awaitIdle();
-                JSONObject state=fixture.manager.state();
-                assertEquals("UPDATE_LOCAL_APK_MISSING",state.optString("error"));
-                assertFalse(state.optBoolean("ready"));assertTrue(state.optBoolean("available"));
-                assertEquals(0,state.optLong("downloadedBytes"));assertEquals(0,state.optInt("downloadPercent"));
-                assertTrue("The user can download again without another network check",fixture.enabled("updateDownload"));
-                assertFalse(fixture.enabled("updateInstall"));
-                assertTrue("Recovery appears next to the buttons",fixture.text("updateActionHint").contains("Tap Download update"));
-                assertTrue(fixture.text("updateActionHint").contains("UPDATE_LOCAL_APK_MISSING"));
-                assertEquals("Missing-file validation must precede PackageInstaller session creation",sessions,sessionIds(fixture.app));
-                assertEquals("Local cache recovery must not contact a server",0,fixture.transport.requests.get());
-                assertNull(fixture.app.engine);
-                System.out.println("AUTOPILOT_MISSING_READY_APK_ACCEPTED actual-install-click local-missing-code ready-cleared progress-cleared download-enabled installer-not-created no-network");
-            }finally{shell(fixture.instrumentation,"appops set "+fixture.context.getPackageName()+" "+appOp+" "+previous);}
+            // The CI runner grants this before instrumentation starts. Changing the app-op here
+            // causes Android to kill this app process and its instrumentation runner.
+            assertTrue("Pre-grant installation permission on the fresh debug emulator before starting instrumentation",fixture.app.getPackageManager().canRequestPackageInstalls());
+            java.util.List<Integer> sessions=sessionIds(fixture.app);
+            fixture.open();
+            assertTrue(fixture.enabled("updateInstall"));
+            fixture.click("updateInstall");fixture.awaitIdle();
+            JSONObject state=fixture.manager.state();
+            assertEquals("UPDATE_LOCAL_APK_MISSING",state.optString("error"));
+            assertFalse(state.optBoolean("ready"));assertTrue(state.optBoolean("available"));
+            assertEquals(0,state.optLong("downloadedBytes"));assertEquals(0,state.optInt("downloadPercent"));
+            assertTrue("The user can download again without another network check",fixture.enabled("updateDownload"));
+            assertFalse(fixture.enabled("updateInstall"));
+            assertTrue("Recovery appears next to the buttons",fixture.text("updateActionHint").contains("Tap Download update"));
+            assertTrue(fixture.text("updateActionHint").contains("UPDATE_LOCAL_APK_MISSING"));
+            assertEquals("Missing-file validation must precede PackageInstaller session creation",sessions,sessionIds(fixture.app));
+            assertEquals("Local cache recovery must not contact a server",0,fixture.transport.requests.get());
+            assertNull(fixture.app.engine);
+            System.out.println("AUTOPILOT_MISSING_READY_APK_ACCEPTED actual-install-click local-missing-code ready-cleared progress-cleared download-enabled installer-not-created no-network");
         }
     }
 
     private static java.util.List<Integer> sessionIds(AutopilotApp app){
         java.util.List<Integer> ids=new java.util.ArrayList<>();for(android.content.pm.PackageInstaller.SessionInfo session:app.getPackageManager().getPackageInstaller().getMySessions())ids.add(session.getSessionId());java.util.Collections.sort(ids);return ids;
-    }
-    private static String shell(Instrumentation instrumentation,String command)throws Exception{
-        try(android.os.ParcelFileDescriptor descriptor=instrumentation.getUiAutomation().executeShellCommand(command);
-            InputStream input=new android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor)){
-            java.io.ByteArrayOutputStream output=new java.io.ByteArrayOutputStream();byte[] buffer=new byte[1024];int count;
-            while((count=input.read(buffer))!=-1)output.write(buffer,0,count);return output.toString("UTF-8");
-        }
-    }
-    private static String appOpMode(String output){
-        java.util.regex.Matcher match=java.util.regex.Pattern.compile("REQUEST_INSTALL_PACKAGES: (allow|deny|ignore|default|foreground)").matcher(output);
-        return match.find()?match.group(1):"default";
     }
 
     private static final class Fixture implements AutoCloseable{

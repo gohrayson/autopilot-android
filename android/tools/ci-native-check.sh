@@ -27,6 +27,16 @@ test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateHttpsTran
 adb wait-for-device
 adb logcat -c
 
+# Changing REQUEST_INSTALL_PACKAGES while instrumentation is alive kills its process.
+# Set fixture permissions on the disposable emulator before Gradle starts the runner.
+[[ "${GITHUB_ACTIONS:-}" == "true" && "$(uname -s)" == "Linux" ]] || { echo 'Require disposable hosted Linux emulator' >&2; exit 1; }
+mapfile -t devices < <(adb devices | awk 'NR>1 && NF {print $1 " " $2}')
+[[ "${#devices[@]}" -eq 1 && "${devices[0]}" =~ ^emulator-[0-9]+\ device$ ]] || { echo 'Require exactly one emulator and no physical device' >&2; exit 1; }
+serial="${devices[0]%% *}"
+adb -s "$serial" install -r -t "$project/app/build/outputs/apk/debug/app-debug.apk"
+adb -s "$serial" shell appops set app.autopilot.android.debug REQUEST_INSTALL_PACKAGES allow
+adb -s "$serial" shell pm grant app.autopilot.android.debug android.permission.POST_NOTIFICATIONS
+
 set +e
 gradle -p "$project" --no-daemon --console=plain \
   :app:connectedDebugAndroidTest \
