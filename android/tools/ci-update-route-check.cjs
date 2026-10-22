@@ -5,6 +5,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { promisify } = require('node:util');
 const execute = promisify(cp.execFile);
+const project = path.resolve(process.argv[2] || path.join(__dirname, '..'));
 const output = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd(), 'ci-native-results');
 
 async function main() {
@@ -13,6 +14,13 @@ async function main() {
   const inventory = (await execute('adb', ['devices'])).stdout.trim().split(/\r?\n/).slice(1).filter(Boolean);
   if (inventory.length !== 1 || !/^emulator-\d+\s+device$/.test(inventory[0])) throw new Error('Require exactly one online emulator and no physical devices.');
   const serial = inventory[0].split(/\s/)[0];
+  // Gradle's connected test runner uninstalls its APKs when it finishes.
+  // This independent instrumentation invocation owns its own installation.
+  for (const file of ['app/build/outputs/apk/debug/app-debug.apk', 'app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk']) {
+    const result = await execute('adb', ['-s', serial, 'install', '-r', '-t', path.join(project, file)],
+      { timeout: 90000, maxBuffer: 1024 * 1024, windowsHide: true });
+    if (!result.stdout.includes('Success')) throw new Error('Updater fixture APK install failed.');
+  }
   let log;
   try {
     const result = await execute('adb', ['-s', serial, 'shell', 'am', 'instrument', '-w', '-e', 'class',
