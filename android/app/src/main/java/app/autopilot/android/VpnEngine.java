@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.*;
 
 /** One serialized controller; preference writes and provider work stay outside network checks. */
 public final class VpnEngine {
+    private static final String TUN_STACK="gvisor";
     private final AutopilotVpnService service;
     private final AutopilotApp app;
     private final ScheduledExecutorService worker=Executors.newSingleThreadScheduledExecutor();
@@ -323,10 +324,13 @@ public final class VpnEngine {
         ensureRunning();tunStarted=new CompletableFuture<>();
         ParcelFileDescriptor descriptor=reuse?service.duplicateTunnel():service.establishTunnel();
         int fd=descriptor.detachFd();descriptor.close();
+        // Our UID bypasses the VPN. A mixed/system stack's kernel TCP forwarder
+        // depends on replies returning through that UID's VPN routes; use a
+        // userspace TCP/UDP stack so other apps' packets stay on the TUN path.
         Clash.INSTANCE.startTUN(fd,new TunInterface(){
             @Override public void protect(int socket){if(!service.protect(socket))app.log("vpn","SOCKET_PROTECT_FAILED");}
             @Override public String resolverProcess(int protocol,String source,String target,int uid){return "";}
-        },"Autopilot","mixed",AutopilotVpnService.ADDRESSES,AutopilotVpnService.DNS,AutopilotVpnService.MTU);
+        },"Autopilot",TUN_STACK,AutopilotVpnService.ADDRESSES,AutopilotVpnService.DNS,AutopilotVpnService.MTU);
         if(!await(tunStarted,7000))throw new IOException("TUN_START_FAILED");tunReady=true;
         app.log("vpn","TUN_STARTED");phase="testing";detail="VPN active; testing nodes";publish();
     }
@@ -415,7 +419,7 @@ public final class VpnEngine {
                 .put("auto",pinned.isEmpty()).put("busy",busy).put("error",error).put("detail",detail).put("lastSwitch",lastSwitch).put("nodes",rows).put("tun",tunReady);
             snapshot.put("coreBaselineAccepted",baselineAccepted).put("skippedCount",coreSkipped.size()).put("skippedNodes",skipped);
             snapshot.put("coreProfileAccepted",profileUsable).put("nodeHealth",HealthDiagnostics.providers(rows)).put("networkSignals",networkSignals.json())
-                .put("checkPath","per-node mixed listener; excluded Autopilot UID").put("resolverPolicy",CoreDnsConfig.POLICY_ID);
+                .put("checkPath","per-node mixed listener; excluded Autopilot UID").put("resolverPolicy",CoreDnsConfig.POLICY_ID).put("tunStack",TUN_STACK);
             JSONObject diagnostic=app.coreDiagnostic();if(diagnostic!=null)snapshot.put("coreDiagnostic",diagnostic);
             JSONObject historical=app.historicalCoreDiagnostic();if(historical!=null)snapshot.put("lastCoreFailure",historical);
             app.publish(snapshot);service.updateNotification(current==null?detail:current.name+(pinned.isEmpty()?" · Auto":" · Pinned"));

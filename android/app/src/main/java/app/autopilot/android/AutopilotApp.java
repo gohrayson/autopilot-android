@@ -103,7 +103,8 @@ public final class AutopilotApp extends Application {
         JSONObject historical=historicalCoreDiagnostic();if(historical!=null)out.append("Last core failure (historical): ").append(historical).append("\n");
         out.append("Health check path: ").append(s.optString("checkPath","not started")).append("\n")
             .append("Other-app tunnel traffic: not verified by node checks\n")
-            .append("Resolver policy: ").append(s.optString("resolverPolicy",CoreDnsConfig.POLICY_ID)).append("\n");
+            .append("Resolver policy: ").append(s.optString("resolverPolicy",CoreDnsConfig.POLICY_ID)).append("\n")
+            .append("TUN stack: ").append(s.optString("tunStack","not started")).append("\n");
         JSONArray health=s.optJSONArray("nodeHealth");if(health!=null)out.append("Node health: ").append(health).append("\n");
         JSONObject network=s.optJSONObject("networkSignals");if(network!=null)out.append("Native network observations (session only, not per-node): ").append(network).append("\n");
         if(updates!=null)out.append(updates.diagnostic());
