@@ -89,3 +89,20 @@ WINDOWS_RELEASE_IDENTITY_PROBE file=dist/Autopilot-0.3.3-portable.exe product=Au
 ```
 
 New-release dry-run preparation must still be executed after final APK/Windows builds and source packaging. This receipt deliberately does not stand in for that actual artifact check.
+
+## New Windows 0.4.0 artifact identity probe
+
+After the root worker produced the final Windows files, the same read-only verifier was run against them. No executable was launched:
+
+```powershell
+@'
+const fs=require('node:fs');const publisher=require('./android/tools/publish-update.cjs');for(const kind of ['setup','portable']){const name=`dist/Autopilot-0.4.0-${kind}.exe`;const info=publisher.verifyWindowsExecutable(fs.readFileSync(name),'0.4.0',kind);console.log(`WINDOWS_040_IDENTITY_PROBE file=${name} product=Autopilot version=0.4.0 pe=true nsis=true sizeBytes=${info.sizeBytes} sha256=${info.sha256}`)}
+'@ | node
+```
+
+Verbatim output:
+
+```text
+WINDOWS_040_IDENTITY_PROBE file=dist/Autopilot-0.4.0-setup.exe product=Autopilot version=0.4.0 pe=true nsis=true sizeBytes=117806664 sha256=04d895ffe2e6a5551a91c2f7658bea01bb15a7830c542443c44436f8e744a2d0
+WINDOWS_040_IDENTITY_PROBE file=dist/Autopilot-0.4.0-portable.exe product=Autopilot version=0.4.0 pe=true nsis=true sizeBytes=117589245 sha256=760e6642a966ae9c95e6c9fb32356e65f2bf16566c3672a9bb009924177d8b19
+```

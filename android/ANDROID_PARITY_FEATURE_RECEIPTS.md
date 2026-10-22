@@ -77,6 +77,12 @@ Catalog entry: `app.autopilot.android.ProductParityUiTest#sharedSettingsRoutingA
 
 This probe operates on an account-free isolated emulator, verifies installed geodata, submits global and regional profiles to the actual bundled JNI core from an isolated private directory, opens the real settings editors, rejects an empty required-service list and conflicting website routes without partial saving, saves valid settings, toggles the global switch, checks the pause label and provider metadata, and restores previous preferences. It does not start a VPN or call a provider API. The orchestration receipt records the emulator run separately.
 
+The hosted run [39814530081](https://github.com/gohrayson/autopilot-android/actions/runs/39814530081), source `2d259d90ea17d5504250cecc37a6534443a73f3a`, passed this exact test. Retained XML and native logcat were independently checked; see `ANDROID_040_HOSTED_RECEIPTS.md` for the runnable catalog verification and separate HTTPS/TUN gates. Its actual marker was:
+
+```text
+AUTOPILOT_PRODUCT_PARITY_UI_ACCEPTED settingsAtomic=true requiredServices=true websiteConflictGuard=true globalMode=true pauseState=true providerMetadata=true importedStatus=true noVpnMutation=true pinnedGeo=true nativeRuleAndGlobalAccepted=true
+```
+
 ## Limits
 
 No live desktop VPN, provider account, phone VPN, ADB installation, or release publication was changed by this worker. Android app-list route changes need an explicit Stop/Start by design; choosing an app in Android and a Windows executable are separate operating-system identities, so portable preferences exclude both app lists and their mode. Exported preferences contain no accounts, sessions, passwords, provider configuration keys, or updater authority changes.
