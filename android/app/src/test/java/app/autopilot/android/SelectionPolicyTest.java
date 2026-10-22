@@ -49,4 +49,25 @@ public class SelectionPolicyTest {
         stable.latency(100,NOW);assertTrue(stable.qualified(NOW));
     }
     @Test public void rejectsFutureTimestamp(){var h=node("a","JP",100);assertFalse(h.qualified(NOW-1));}
+    @Test public void applicationCooldownSurvivesGoogleSuccessAndRequiresFreshProof(){
+        var h=node("a","JP",100);h.applicationFailed(NOW);h.latency(40,NOW+1);assertFalse(h.qualified(NOW+1));
+        assertFalse(h.eligibleForProof(NOW+59_999));h.latency(50,NOW+60_001);h.servicesAt=NOW+60_001;
+        assertTrue(h.eligibleForProof(NOW+60_001));assertFalse(h.qualified(NOW+60_001));h.applicationVerified(NOW+60_001);assertTrue(h.qualified(NOW+60_001));
+        h.applicationFailed(NOW+60_002);assertEquals(NOW+180_002,h.appFailureUntil);
+    }
+    @Test public void failedBestCandidateLeavesNextQualifiedCandidateAvailable(){
+        var fastest=node("fastest","JP",30);var fallback=node("fallback","SG",90);fastest.applicationFailed(NOW);
+        assertSame(fallback,SelectionPolicy.best(List.of(fastest,fallback),List.of("JP","SG"),NOW));
+    }
+    @Test public void measuredApplicationTransportCanSustainGoogleOnlyOutageWithoutInventedRtt(){
+        var h=node("a","JP",100);h.latency(-1,NOW+1);h.transportVerified(NOW+2,317);
+        assertEquals(-1,h.latency);assertEquals(317,h.applicationLatency);assertEquals(317,h.displayLatency());assertTrue(h.qualified(NOW+2));
+        assertFalse(h.qualified(NOW+SelectionPolicy.LATENCY_TTL+3));
+    }
+    @Test public void selectedRouteSurvivesExpiredServiceCheckButCandidatesStillNeedProof(){
+        var h=node("active","JP",100);long later=NOW+SelectionPolicy.SERVICE_TTL+1;h.transportVerified(later,222);
+        assertFalse(h.qualified(later));assertFalse(h.eligibleForProof(later));assertTrue(h.retainSelectedTransport(later));
+        h.servicesAt=later;h.chatgpt="unknown";assertFalse(h.qualified(later));assertTrue(h.retainSelectedTransport(later));
+        assertFalse(h.retainSelectedTransport(later+45_001));h.applicationFailed(later);assertFalse(h.retainSelectedTransport(later));
+    }
 }

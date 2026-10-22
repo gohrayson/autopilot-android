@@ -26,7 +26,7 @@ public final class MainActivity extends Activity {
     private static final int DISABLED_BUTTON_BACKGROUND=0xffe3e5e9, DISABLED_BUTTON_TEXT=0xff8b919c, SECONDARY_BUTTON_BACKGROUND=0xffedf2ff;
     private AutopilotApp app;
     private LinearLayout content, nodeList;
-    private TextView phase, selected, detail, countries, oneStatus, octoStatus, nodeSummary, error, updateSummary;
+    private TextView phase, selected, detail, connectionHealth, countries, oneStatus, octoStatus, nodeSummary, error, updateSummary;
     private AlertDialog updateDialog;
     private TextView updateDialogStatus, updateDialogNotes, updateProgressText, updateActionHint;
     private ProgressBar updateProgressBar;
@@ -56,6 +56,7 @@ public final class MainActivity extends Activity {
 
         LinearLayout status=card(); phase=addText(status,"Ready to start",14,BLUE); selected=addText(status,"Connect an account",25,INK); selected.setTypeface(null,Typeface.BOLD);
         detail=addText(status,"Sign in below or import a configuration.",14,MUTED);
+        connectionHealth=addText(status,"",13,MUTED);connectionHealth.setVisibility(View.GONE);
         error=addText(status,"",14,RED);
         connect=button("Start VPN",true); connect.setOnClickListener(v->toggleVpn()); status.addView(connect,full());
         LinearLayout actions=row(); auto=button("Resume Auto",false); auto.setOnClickListener(v->{if(app.engine!=null)app.engine.resumeAuto();}); actions.addView(auto,new LinearLayout.LayoutParams(0,-2,1));
@@ -89,13 +90,15 @@ public final class MainActivity extends Activity {
         JSONObject s=app.state();String p=s.optString("phase","idle"),current=s.optString("current","");
         boolean running=app.engine!=null && !Set.of("stopped","idle","error").contains(p);
         boolean connected=p.equals("connected")&&!current.isEmpty();
+        JSONObject watchdog=s.optJSONObject("watchdog");
+        boolean healthUncertain=connected&&healthUncertain(watchdog,System.currentTimeMillis());
         phase.setText(switch(p){
             case "starting"->"STARTING";case "testing"->"CHECKING NODES";
-            case "connected"->connected?(s.optBoolean("pinned")?"CONNECTED · PINNED":"CONNECTED · AUTO"):"CHECKING NODES";
+            case "connected"->healthUncertain?"CHECKING CONNECTION":connected?(s.optBoolean("pinned")?"CONNECTED · PINNED":"CONNECTED · AUTO"):"CHECKING NODES";
             case "degraded"->"TRAFFIC PAUSED";case "paused"->"AUTO PAUSED";
             case "error"->"NEEDS ATTENTION";case "stopped"->"DISCONNECTED";default->"READY";
         });
-        phase.setTextColor(connected?GREEN:Set.of("error","degraded").contains(p)?RED:BLUE);
+        phase.setTextColor(connected&&!healthUncertain?GREEN:Set.of("error","degraded").contains(p)?RED:BLUE);
         JSONArray stateNodes=s.optJSONArray("nodes");
         boolean hasNodes=!app.providers.nodes().isEmpty()||stateNodes!=null&&stateNodes.length()>0;
         selected.setText(switch(p){
@@ -110,6 +113,8 @@ public final class MainActivity extends Activity {
             default->hasNodes?"Ready to connect":"Connect an account";
         });
         detail.setText(s.optString("detail",running?"Checking your connection…":"Automatic switching stays active unless you pin a node."));
+        String healthMessage=connectionHealthMessage(watchdog,System.currentTimeMillis());
+        connectionHealth.setText(healthMessage);connectionHealth.setVisibility(healthMessage.isEmpty()?View.GONE:View.VISIBLE);
         error.setText(errorMessage(s.optString("error","")));error.setVisibility(error.getText().length()==0?View.GONE:View.VISIBLE);
         connect.setText(running?"Stop VPN":"Start VPN");connect.setEnabled(running||!app.providers.nodes().isEmpty());
         auto.setEnabled(running); retest.setEnabled(running&&!s.optBoolean("busy"));
@@ -139,6 +144,26 @@ public final class MainActivity extends Activity {
             nodeList.addView(line);View divider=new View(this);divider.setBackgroundColor(0xffe9edf4);nodeList.addView(divider,new LinearLayout.LayoutParams(-1,dp(1)));
         }
     }
+    static boolean healthUncertain(JSONObject watchdog,long now){
+        if(watchdog==null)return false;
+        String code=watchdog.optString("code");
+        if(Set.of("SUSPECT","SERVICE_PATH_SUSPECT","CONFIRMED_FAILED","CONFIRMED_PARTIAL_FAILED","RECOVERING","NO_VERIFIED_REPLACEMENT").contains(code))return true;
+        long success=watchdog.optLong("lastSuccessAt");
+        return Set.of("HEALTHY","CHECKING").contains(code)&&(success<=0||now<success||now-success>45_000);
+    }
+    static String connectionHealthMessage(JSONObject watchdog,long now){
+        if(watchdog==null)return "";
+        String code=watchdog.optString("code");
+        return switch(code){
+            case "HEALTHY"->healthUncertain(watchdog,now)?"Connection check is overdue. Verifying access…":"HTTPS access checked at "+DateFormat.getTimeInstance(DateFormat.MEDIUM).format(new Date(watchdog.optLong("lastSuccessAt")));
+            case "CHECKING"->"Checking HTTPS access…";
+            case "SUSPECT","SERVICE_PATH_SUSPECT"->"Connection may be failing. Confirming before switching…";
+            case "CONFIRMED_FAILED","RECOVERING"->"Connection failed. Verifying a replacement…";
+            case "CONFIRMED_PARTIAL_FAILED"->"A service path failed. Comparing verified replacements…";
+            case "NO_VERIFIED_REPLACEMENT"->"No replacement passed the checks. Autopilot is checking again.";
+            default->"";
+        };
+    }
     private static String mark(String result){return switch(result){case "ok"->"✓";case "challenged"->"◐";case "blocked","error"->"✕";default->"·";};}
     private static String errorMessage(String code){String core=CoreDiagnostics.messageForCode(code);if(core!=null)return core;return switch(code){
         case ""->"";case "NO_NODES"->"Sign in to a VPN provider or import a configuration.";
@@ -148,6 +173,8 @@ public final class MainActivity extends Activity {
         case "CORE_UNAVAILABLE"->"The VPN core could not load on this device. Open Diagnostics.";
         case "VPN_OPERATION_FAILED"->"The VPN could not complete an operation. Open Diagnostics.";
         case "CURRENT_NODE_FAILED"->"The current node failed a check. Autopilot is finding a working replacement.";
+        case "APPLICATION_PATH_FAILED"->"The active node lost HTTPS access. Autopilot is checking replacements.";
+        case "SERVICE_PATH_DEGRADED"->"A service is not responding. The VPN is staying on the working connection while Autopilot checks alternatives.";
         case "CORE_TIMEOUT"->"The VPN core took too long to respond. Stop and start the VPN to retry.";
         case "CORE_STORAGE"->"Android could not write the VPN configuration. Check available storage.";
         case "CORE_CONFIG_REJECTED"->"The VPN core rejected the configuration. Open Diagnostics for the recorded reason.";

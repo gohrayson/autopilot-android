@@ -107,6 +107,7 @@ public final class AutopilotApp extends Application {
             .append("TUN stack: ").append(s.optString("tunStack","not started")).append("\n");
         JSONArray health=s.optJSONArray("nodeHealth");if(health!=null)out.append("Node health: ").append(health).append("\n");
         JSONObject network=s.optJSONObject("networkSignals");if(network!=null)out.append("Native network observations (session only, not per-node): ").append(network).append("\n");
+        JSONObject watchdog=s.optJSONObject("watchdog");if(watchdog!=null)out.append("Active HTTPS watchdog: ").append(watchdog).append("\n");
         if(updates!=null)out.append(updates.diagnostic());
         JSONArray skipped=s.optJSONArray("skippedNodes");if(skipped!=null&&skipped.length()>0)out.append("Skipped diagnostics: ").append(skipped).append("\n");
         for(String p:List.of("onevpn","octohide")){

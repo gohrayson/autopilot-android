@@ -24,6 +24,7 @@ test -f "$project/app/src/androidTest/java/app/autopilot/android/VpnStatusUiTest
 test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateStatusUiTest.java"
 test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateCacheRuntimeTest.java"
 test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateHttpsTransportRuntimeTest.java"
+test -f "$project/app/src/androidTest/java/app/autopilot/android/ReachabilityRuntimeTest.java"
 adb wait-for-device
 adb logcat -c
 
@@ -40,7 +41,7 @@ adb -s "$serial" shell pm grant app.autopilot.android.debug android.permission.P
 set +e
 gradle -p "$project" --no-daemon --console=plain \
   :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest,app.autopilot.android.UpdateDownloadRuntimeTest,app.autopilot.android.VpnStatusUiTest,app.autopilot.android.UpdateStatusUiTest,app.autopilot.android.UpdateCacheRuntimeTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest,app.autopilot.android.UpdateDownloadRuntimeTest,app.autopilot.android.VpnStatusUiTest,app.autopilot.android.UpdateStatusUiTest,app.autopilot.android.UpdateCacheRuntimeTest,app.autopilot.android.ReachabilityRuntimeTest \
   2>&1 | tee "$results/native-core-gradle.log"
 gradle_status=${PIPESTATUS[0]}
 set -e
@@ -67,6 +68,7 @@ selected = {
         "missingReadyApkInvalidatesCacheAndEnablesDownload",
     },
     "app.autopilot.android.UpdateCacheRuntimeTest": {"canonicalAliasCleanupKeepsCompleteApkAndLeavesResumeFiles"},
+    "app.autopilot.android.ReachabilityRuntimeTest": {"independentWatchdogBoundsRealConnectsWhileControllerIsBusy"},
 }
 cases = []
 for report in root.rglob("*.xml"):

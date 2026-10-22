@@ -9,6 +9,10 @@ public final class SelectionPolicy {
     public static final class Health {
         public final String id, name, country;
         public long latencyAt, servicesAt;
+        public long appFailureUntil,appVerifiedAt,transportAt;
+        public int appFailures;
+        public int applicationLatency=-1;
+        public boolean appRejected;
         public int latency = -1, failures;
         public String claude = "unknown", chatgpt = "unknown", gemini = "unknown";
         private final ArrayDeque<Integer> samples = new ArrayDeque<>();
@@ -19,7 +23,7 @@ public final class SelectionPolicy {
             failures=Math.max(0,failures-1); samples.addLast(ms); if(samples.size()>5)samples.removeFirst();
         }
         public int score() {
-            if(latency<=0)return Integer.MAX_VALUE;
+            if(latency<=0||transportAt-latencyAt>LATENCY_TTL)return applicationLatency<=0?Integer.MAX_VALUE:applicationLatency+failures*250;
             ArrayList<Integer> ordered=new ArrayList<>(samples); Collections.sort(ordered);
             int median=ordered.isEmpty()?latency:ordered.get(ordered.size()/2);
             int jitter=ordered.size()<2?0:ordered.get(ordered.size()-1)-ordered.get(0);
@@ -28,8 +32,17 @@ public final class SelectionPolicy {
         }
         public boolean latencyFresh(long now) { return latency>0 && now>=latencyAt && now-latencyAt<=LATENCY_TTL; }
         public boolean qualified(long now) {
-            return latencyFresh(now) && now>=servicesAt && now-servicesAt<=SERVICE_TTL && usable(claude)&&usable(chatgpt)&&usable(gemini);
+            return !appRejected&&eligibleForProof(now);
         }
+        public boolean connectionFresh(long now){return latencyFresh(now)||applicationLatency>0&&now>=transportAt&&now-transportAt<=LATENCY_TTL;}
+        public boolean eligibleForProof(long now){return now>=appFailureUntil&&connectionFresh(now)&&now>=servicesAt&&now-servicesAt<=SERVICE_TTL&&usable(claude)&&usable(chatgpt)&&usable(gemini);}
+        public void applicationFailed(long now){appRejected=true;appFailures=Math.min(4,appFailures+1);appFailureUntil=now+Math.min(300_000L,60_000L<<(appFailures-1));}
+        /** An ordinary latency pass deliberately cannot clear this state. */
+        public void applicationVerified(long now){appRejected=false;appFailureUntil=0;appVerifiedAt=now;}
+        public void transportVerified(long now,int measuredMillis){if(measuredMillis>0){transportAt=now;applicationLatency=measuredMillis;}}
+        public int displayLatency(){return latency>0&&transportAt-latencyAt<=LATENCY_TTL?latency:applicationLatency;}
+        /** Only an already selected route may survive a site-wide service outage on recent independent transport proof. */
+        public boolean retainSelectedTransport(long now){return !appRejected&&applicationLatency>0&&transportAt>0&&now>=transportAt&&now-transportAt<=45_000;}
     }
     public static boolean usable(String verdict) {return "ok".equals(verdict)||"challenged".equals(verdict);}
     public static int tier(String country,List<String> preferred) {int i=preferred.indexOf(country);return i<0?preferred.size():i;}

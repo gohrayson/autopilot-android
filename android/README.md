@@ -2,6 +2,10 @@
 
 Native Android client for Autopilot. Requires Android 8.0 or later; includes ARM64, ARMv7 and x86_64. The Windows application is independent.
 
+Version 0.1.8 adds independent active-node HTTPS monitoring while discovery is busy. It confirms repeated failures across fixed Google, OpenAI and Anthropic destinations, freshly verifies replacements, and applies a separate cooldown to failed application paths. A repeated single-service failure permits switching only when a fresh alternative fixes it. A Google test outage alone no longer defines a node as down. An already-selected route with recent working HTTPS evidence remains available during an isolated service outage while Autopilot checks alternatives. The status shows confirmation, recovery and overdue checks; diagnostics include fixed watchdog codes and timestamps.
+
+These checks verify the node's outbound path through an explicit local proxy. Other apps use a separate Android TUN path; the native separate-UID runtime probe remains the verification gate for that path. No health check inspects users' request bodies or saves browsing destinations.
+
 Version 0.1.7 gives disabled buttons a grey background and grey text. Enabled primary actions remain blue and secondary actions use a pale blue background. This makes unavailable Download/Install controls visibly different from actions the user can take.
 
 Version 0.1.6 routes update requests through the active verified VPN node. Without a running Autopilot VPN it connects directly. A running VPN without a verified node reports that the update route is unavailable. Update checks show progress and specific errors; a verified downloaded APK is kept ready instead of being locked behind automatic network checks. Verification evidence is recorded in [ANDROID_016_RECEIPTS.md](ANDROID_016_RECEIPTS.md).

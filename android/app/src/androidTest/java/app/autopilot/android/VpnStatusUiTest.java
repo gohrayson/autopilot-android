@@ -44,6 +44,20 @@ public final class VpnStatusUiTest {
             show(instrumentation,app,activity,snapshot("connected","services","Probe Taiwan",true,false,"Checking service access: Probe Japan"),"CONNECTED · AUTO","Probe Taiwan","Checking service access: Probe Japan");
             show(instrumentation,app,activity,snapshot("connected","","Probe Taiwan",false,false,"Node connection checks passed · Auto"),"CONNECTED · AUTO","Probe Taiwan","Node connection checks passed · Auto");
             show(instrumentation,app,activity,snapshot("connected","","Probe Taiwan",false,true,"Node connection checks passed · Pinned"),"CONNECTED · PINNED","Probe Taiwan","Node connection checks passed · Pinned");
+            long checkedAt=System.currentTimeMillis();
+            JSONObject healthy=watchdog("HEALTHY",checkedAt);
+            show(instrumentation,app,activity,snapshot("connected","","Probe Taiwan",false,false,"Auto").put("watchdog",healthy),"CONNECTED · AUTO","Probe Taiwan","Auto");
+            assertTrue(text(instrumentation,activity,"connectionHealth").startsWith("HTTPS access checked at "));
+            assertFalse(MainActivity.healthUncertain(healthy,checkedAt));
+            assertTrue("Old success must not imply current health",MainActivity.healthUncertain(healthy,checkedAt+45_001));
+            assertTrue("Future timestamps are not fresh evidence",MainActivity.healthUncertain(healthy,checkedAt-1));
+            for(String code:new String[]{"SUSPECT","SERVICE_PATH_SUSPECT","CONFIRMED_FAILED","CONFIRMED_PARTIAL_FAILED","RECOVERING","NO_VERIFIED_REPLACEMENT"}){
+                show(instrumentation,app,activity,snapshot("connected","","Probe Taiwan",false,false,"Auto").put("watchdog",watchdog(code,checkedAt)),"CHECKING CONNECTION","Probe Taiwan","Auto");
+                assertFalse("Recovery state must be visible",text(instrumentation,activity,"connectionHealth").isEmpty());
+            }
+            show(instrumentation,app,activity,snapshot("connected","","Probe Taiwan",false,false,"Auto").put("watchdog",watchdog("HEALTHY",checkedAt-120_000)),"CHECKING CONNECTION","Probe Taiwan","Auto");
+            assertTrue(text(instrumentation,activity,"connectionHealth").contains("overdue"));
+            assertTrue(app.diagnostics().contains("Active HTTPS watchdog:"));
             show(instrumentation,app,activity,snapshot("degraded","","",false,false,"No node passed all checks. VPN blocks unverified traffic."),"TRAFFIC PAUSED","Traffic paused","No node passed all checks. VPN blocks unverified traffic.");
             show(instrumentation,app,activity,snapshot("error","","",false,false,"VPN could not start. See diagnostics.").put("error","TUN_START_FAILED"),"NEEDS ATTENTION","Connection failed","VPN could not start. See diagnostics.");
             show(instrumentation,app,activity,snapshot("stopped","","",false,false,"VPN disconnected"),"DISCONNECTED","Ready to connect","VPN disconnected");
@@ -61,6 +75,9 @@ public final class VpnStatusUiTest {
     private static JSONObject snapshot(String phase,String stage,String current,boolean busy,boolean pinned,String detail)throws Exception{
         JSONArray rows=new JSONArray().put(new JSONObject().put("name","Probe Taiwan").put("country","TW").put("provider","fixture").put("status","Not tested"));
         return new JSONObject().put("phase",phase).put("stage",stage).put("current",current).put("busy",busy).put("pinned",pinned).put("detail",detail).put("nodes",rows);
+    }
+    private static JSONObject watchdog(String code,long checkedAt)throws Exception{
+        return new JSONObject().put("code",code).put("lastCheckAt",checkedAt).put("lastSuccessAt",checkedAt);
     }
 
     private static void show(Instrumentation instrumentation,AutopilotApp app,MainActivity activity,JSONObject state,String badge,String title,String detail)throws Exception{

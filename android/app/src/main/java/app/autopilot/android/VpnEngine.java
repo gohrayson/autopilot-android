@@ -18,6 +18,13 @@ public final class VpnEngine {
     private final AutopilotApp app;
     private final ScheduledExecutorService worker=Executors.newSingleThreadScheduledExecutor();
     private final ServiceChecks checks=new ServiceChecks();
+    private final ReachabilityChecks candidateReachability=new ReachabilityChecks(),watchdogReachability=new ReachabilityChecks();
+    private final ConnectionWatchdog watchdog=new ConnectionWatchdog(watchdogReachability,this::watchdogResult);
+    private volatile ConnectionWatchdog.Snapshot monitorTarget;
+    private long profileGeneration,selectionEpoch;
+    private ConnectionWatchdog.Code watchdogCode=ConnectionWatchdog.Code.IDLE;
+    private long watchdogLastCheck,watchdogLastSuccess;
+    private int watchdogFailedOrigins,watchdogConsecutive;
     private final AtomicBoolean running=new AtomicBoolean(),stopping=new AtomicBoolean(),sweepQueued=new AtomicBoolean(),preferencesQueued=new AtomicBoolean(),nodesQueued=new AtomicBoolean();
     private final Map<String,SelectionPolicy.Health> health=new HashMap<>();
     private final Map<String,HealthDiagnostics.Latency> latencyDiagnostics=new HashMap<>();
@@ -86,6 +93,7 @@ public final class VpnEngine {
     });}
     public void stop(){
         if(!stopping.compareAndSet(false,true))return;
+        monitorTarget=null;watchdog.close();watchdogReachability.close();candidateReachability.close();checks.cancelActive();
         updateRoute=NO_UPDATE_ROUTE;
         running.set(false);Thread thread=activeThread;if(thread!=null)thread.interrupt();
         try{worker.execute(()->{Thread.interrupted();cleanup();});}catch(RejectedExecutionException ignored){cleanup();}
@@ -96,8 +104,7 @@ public final class VpnEngine {
         Node target=findByName(name);if(target==null){error="NODE_UNAVAILABLE";publish();return;}
         busy=true;progress("connections","Checking selected node connection");
         try{
-            probeLatency(target);if(record(target).latency>0)probeServices(target);
-            if(!record(target).qualified(now())){error="NODE_NOT_HEALTHY";detail="Selected node did not pass the service checks";return;}
+            if(!verifyCandidate(target,0)){error="NODE_NOT_HEALTHY";detail="Selected node did not pass fresh connection and application checks";return;}
             if(pin)pinned=target.id;else pinned="";
             if(current==null||!current.id.equals(target.id))promote(target,true);
             else{phase="connected";error="";detail=connectedDetail();}
@@ -120,6 +127,8 @@ public final class VpnEngine {
             final ProfileValidation.Result[] validated={null};
             boolean accepted=reloadSafely(new ProfileTransition(){
                 @Override public void pause(){
+                    invalidateMonitor();profileGeneration++;
+                    for(SelectionPolicy.Health h:health.values()){h.transportAt=0;h.applicationLatency=-1;}
                     updateRoute=NO_UPDATE_ROUTE;
                     profileUsable=false;tunReady=false;current=null;pinned="";busy=true;phase="testing";
                     stage="profile";detail="Updating VPN profile; traffic is paused";publish();
@@ -222,24 +231,10 @@ public final class VpnEngine {
     }
     private void tick()throws Exception{
         if(!tunReady||!profileUsable)return;
-        checkCurrent(true);
+        // Active transport checks run on the independent watchdog, including during sweeps.
+        if(current!=null&&now()-record(current).servicesAt>SelectionPolicy.SERVICE_TTL){probeServices(current);if(!record(current).qualified(now())){decide(true);warnRetainedServicePath();}}
         if(now()-lastSweep>=60_000)queueSweep(false);
         publish();
-    }
-    private void checkCurrent(boolean scheduleSweep)throws Exception{
-        if(current!=null){
-            probeLatency(current);
-            lastCurrentCheck=now();
-            SelectionPolicy.Health h=record(current);
-            requestProviderRecovery();
-            if(h.latency>0&&(now()-h.servicesAt>SelectionPolicy.SERVICE_TTL || !h.qualified(now())))probeServices(current);
-            if(!h.qualified(now())){
-                if(current.id.equals(pinned)){pinned="";app.log("selection","FAILED_PIN_RELEASED");}
-                decide(true);
-                if(current!=null&&!record(current).qualified(now())){phase="degraded";error="CURRENT_NODE_FAILED";detail="Current node failed a check; finding a verified replacement";}
-                if(scheduleSweep)queueSweep(true);
-            }
-        }
     }
     private void sweep(boolean force)throws Exception{
         if(nodes.isEmpty()){lastSweep=now();busy=false;stage="";noNodes();publish();return;}
@@ -256,21 +251,25 @@ public final class VpnEngine {
                     try{result=HealthDiagnostics.latency(await(pending.get(i),7500));}
                     catch(TimeoutException ignored){result=HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CHECK_TIMEOUT);}
                     catch(ExecutionException ignored){result=HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CORE_RESPONSE_FAILED);}
-                    recordLatency(batch.get(i),result);
+                    // Discovery may not condemn an active route from one Google-only failure.
+                    if(result.millis>0||current==null||!current.id.equals(batch.get(i).id))recordLatency(batch.get(i),result);
                     if(current!=null&&current.id.equals(batch.get(i).id))lastCurrentCheck=now();
                     stage="connections";detail="Testing connections: "+(offset+i+1)+" of "+nodes.size();
                 }
-                // A long provider list must not starve the active node's 15-second watchdog.
-                if(current!=null&&now()-lastCurrentCheck>=15_000)checkCurrent(false);
                 publish();
             }
             requestProviderRecovery();
             ArrayList<SelectionPolicy.Health> ordered=new ArrayList<>(health.values());ordered.sort(SelectionPolicy.order(app.preferred()));
-            int qualified=0,bestTier=Integer.MAX_VALUE;
+            int qualified=0,bestTier=Integer.MAX_VALUE,applicationFallbackAttempts=0;
             // Test the fastest candidates in each country tier until a verified tier is found.
             // Three healthy candidates give upgrades a stability choice without probing every service on every node.
             for(SelectionPolicy.Health h:ordered){
-                ensureRunning();if(!h.latencyFresh(now()))continue;
+                ensureRunning();
+                if(!h.connectionFresh(now())){
+                    // Google can itself be unavailable. Obtain real HTTPS timing and application proof on a bounded few alternatives.
+                    if(h.latencyAt==0||h.latency>0||now()<h.appFailureUntil||applicationFallbackAttempts++>=4)continue;
+                    Node fallback=findById(h.id);if(fallback==null||!verifyCandidate(fallback,0))continue;
+                }
                 int tier=SelectionPolicy.tier(h.country,app.preferred());
                 if(qualified>=3 || qualified>0 && tier>bestTier)break;
                 if(!h.qualified(now())){Node n=findById(h.id);if(n!=null)probeServices(n);publish();}
@@ -278,33 +277,57 @@ public final class VpnEngine {
                 if(current==null || !record(current).qualified(now()))decide(true);
             }
             decide(force);lastSweep=now();
-            if(current==null || !record(current).qualified(now())){
+            if(current==null || !currentUsable()){
                 phase="degraded";error="NO_HEALTHY_NODE";detail="No node passed all checks. VPN stays active and blocks unverified traffic.";
-                if(current!=null){action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name","REJECT").toString(),5000);action("closeAllConnections",null,5000);current=null;pinned="";}
-            }
+                if(current!=null){action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name","REJECT").toString(),5000);action("closeAllConnections",null,5000);current=null;pinned="";invalidateMonitor();}
+            }else warnRetainedServicePath();
         }finally{inSweep=false;finishChecks();publish();}
     }
     private void decide(boolean force)throws Exception{
         if(!pinned.isEmpty()){
-            Node held=findById(pinned);if(held!=null && record(held).qualified(now()))return;
+            Node held=findById(pinned);if(held!=null && (record(held).qualified(now())||current!=null&&current.id.equals(held.id)&&currentUsable()))return;
             pinned="";app.log("selection","FAILED_PIN_RELEASED");
         }
-        SelectionPolicy.Health best=SelectionPolicy.best(health.values(),app.preferred(),now());
         SelectionPolicy.Health active=current==null?null:record(current);
-        if(SelectionPolicy.shouldSwitch(active,best,app.preferred(),now(),lastSwitch,force)){
-            Node candidate=findById(best.id);if(candidate==null)return;
-            // Recheck this node's explicit mixed listener. This verifies its outbound,
-            // independently of the separate Android TUN path used by other apps.
-            if(now()-best.servicesAt>30_000){probeServices(candidate);if(!best.qualified(now()))return;}
-            boolean unhealthy=active==null||!active.qualified(now());promote(candidate,unhealthy);
+        ArrayList<SelectionPolicy.Health> ordered=new ArrayList<>(health.values());ordered.sort(SelectionPolicy.order(app.preferred()));
+        int attempted=0;long deadline=now()+60_000;
+        for(SelectionPolicy.Health best:ordered){
+            ensureRunning();if(!best.eligibleForProof(now())||current!=null&&best.id.equals(current.id))continue;
+            if(attempted>=4||now()>deadline)break;
+            // Previously rejected nodes need fresh proof after cooldown, before ranking them as usable.
+            boolean freshlyChecked=false;
+            if(best.appRejected){attempted++;Node retry=findById(best.id);if(retry==null||!verifyCandidate(retry,0))continue;freshlyChecked=true;}
+            if(!SelectionPolicy.shouldSwitch(active,best,app.preferred(),now(),lastSwitch,force))continue;
+            Node candidate=findById(best.id);if(candidate==null)continue;
+            if(!freshlyChecked){attempted++;if(!verifyCandidate(candidate,0))continue;}
+            active=current==null?null:record(current);
+            if(SelectionPolicy.shouldSwitch(active,record(candidate),app.preferred(),now(),lastSwitch,force)){
+                boolean unhealthy=active==null||!active.qualified(now());promote(candidate,unhealthy);return;
+            }
         }
     }
+    private boolean verifyCandidate(Node node,int requiredOrigins)throws Exception{
+        SelectionPolicy.Health h=record(node);if(h==null||now()<h.appFailureUntil)return false;
+        probeLatency(node);
+        Integer port=ports.get(node.id);if(port==null)return false;
+        ConnectionWatchdog.Result result=candidateReachability.check(port);
+        if(result.broadFailure()){h.applicationFailed(now());app.log("health","CANDIDATE_APPLICATION_PATH_FAILED");return false;}
+        // Both required application origins must work. A Google-only outage has an actual measured HTTPS fallback.
+        if((result.failedMask&6)!=0)return false;
+        h.transportVerified(now(),result.latencyMillis);probeServices(node);if(!h.eligibleForProof(now()))return false;
+        h.applicationVerified(now());return h.qualified(now());
+    }
     private void promote(Node node,boolean closeExisting)throws Exception{
-        action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name",node.name).toString(),5000);
-        verifySelector(node.name);
-        if(closeExisting)action("closeAllConnections",null,5000);
-        current=node;lastSwitch=now();lastCurrentCheck=now();phase="connected";error="";detail=connectedDetail();
-        app.log("selection",closeExisting?"NODE_SWITCH":"HEALTHY_UPGRADE");publish();
+        // Cancellation may yield read-only discovery, never a half-applied selector mutation.
+        boolean cancellable;
+        synchronized(operationLock){ensureRunning();cancellable=inSweep;inSweep=false;}
+        try{
+            action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name",node.name).toString(),5000);
+            verifySelector(node.name);
+            if(closeExisting)action("closeAllConnections",null,5000);
+            current=node;selectionEpoch++;lastSwitch=now();lastCurrentCheck=now();phase="connected";error="";resetWatchdogState(ConnectionWatchdog.Code.CHECKING);detail=connectedDetail();
+            app.log("selection",closeExisting?"NODE_SWITCH":"HEALTHY_UPGRADE");publish();
+        }finally{synchronized(operationLock){inSweep=cancellable;}}
     }
     private void verifySelector(String name)throws Exception{
         JSONObject response=action("getProxies",null,5000);Object data=response.opt("data");
@@ -321,7 +344,49 @@ public final class VpnEngine {
     }
     private void recordLatency(Node node,HealthDiagnostics.Latency result){record(node).latency(result.millis,now());latencyDiagnostics.put(node.id,result);
         if(current!=null&&current.id.equals(node.id)&&!record(node).qualified(now()))updateRoute=NO_UPDATE_ROUTE;}
-    private String connectedDetail(){return "Node connection checks passed · "+(pinned.isEmpty()?"Auto":"Pinned");}
+    private String connectedDetail(){return (watchdogCode==ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT?"One application path needs attention":"Node connection checks passed")+" · "+(pinned.isEmpty()?"Auto":"Pinned");}
+    private boolean currentUsable(){return current!=null&&(record(current).qualified(now())||record(current).retainSelectedTransport(now()));}
+    private void warnRetainedServicePath(){if(current!=null&&!record(current).qualified(now())&&record(current).retainSelectedTransport(now())){watchdogCode=ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT;phase="connected";error="SERVICE_PATH_DEGRADED";detail="Internet route remains active; one application service is unavailable. Checking alternatives.";}}
+    private void resetWatchdogState(ConnectionWatchdog.Code code){watchdogCode=code;watchdogLastCheck=watchdogLastSuccess=0;watchdogFailedOrigins=watchdogConsecutive=0;}
+    private void invalidateMonitor(){monitorTarget=null;watchdog.target(null);updateRoute=NO_UPDATE_ROUTE;resetWatchdogState(ConnectionWatchdog.Code.IDLE);}
+    private void watchdogResult(ConnectionWatchdog.Observation observation){
+        if(!observation.snapshot.equals(monitorTarget)||!running.get()||stopping.get())return;
+        if(observation.code==ConnectionWatchdog.Code.CONFIRMED_FAILED)updateRoute=NO_UPDATE_ROUTE;
+        if(observation.code==ConnectionWatchdog.Code.CONFIRMED_PARTIAL_FAILED)watchdog.resume();
+        if(observation.code==ConnectionWatchdog.Code.CONFIRMED_FAILED||observation.code==ConnectionWatchdog.Code.CONFIRMED_PARTIAL_FAILED)preemptSweep();
+        submit(()->applyWatchdog(observation));
+    }
+    private void applyWatchdog(ConnectionWatchdog.Observation observation)throws Exception{
+        if(!observation.snapshot.equals(monitorTarget)||current==null)return;
+        watchdogCode=observation.code;watchdogLastCheck=observation.at;watchdogLastSuccess=observation.lastSuccessAt;
+        watchdogFailedOrigins=observation.failedOrigins;watchdogConsecutive=observation.consecutiveFailures;
+        // HTTPS health has its own freshness. It must not fabricate or replace measured Google RTT samples.
+        if(observation.failedOrigins<=1&&observation.latencyMillis>0){record(current).transportVerified(observation.at,observation.latencyMillis);lastCurrentCheck=observation.at;}
+        if(observation.code==ConnectionWatchdog.Code.HEALTHY&&record(current).qualified(now())&&"SERVICE_PATH_DEGRADED".equals(error)){error="";detail=connectedDetail();}
+        if(observation.code==ConnectionWatchdog.Code.CONFIRMED_FAILED){
+            record(current).applicationFailed(now());pinned="";watchdogCode=ConnectionWatchdog.Code.RECOVERING;
+            phase="degraded";error="APPLICATION_PATH_FAILED";detail="Application connections failed repeatedly; checking replacements";app.log("health","APPLICATION_PATH_FAILED");publish();
+            decide(true);
+            if(current!=null&&record(current).appRejected){
+                action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name","REJECT").toString(),5000);action("closeAllConnections",null,5000);
+                current=null;pinned="";invalidateMonitor();watchdogCode=ConnectionWatchdog.Code.NO_VERIFIED_REPLACEMENT;
+                error="NO_HEALTHY_NODE";detail="No verified replacement. VPN is blocking unverified traffic.";
+            }
+            queueSweep(true);
+        }else if(observation.code==ConnectionWatchdog.Code.CONFIRMED_PARTIAL_FAILED){
+            // Compare another route before blaming this node: a service-wide outage must not churn every node.
+            Node prior=current;ArrayList<SelectionPolicy.Health> ordered=new ArrayList<>(health.values());ordered.sort(SelectionPolicy.order(app.preferred()));
+            int attempted=0;long deadline=now()+60_000;
+            inSweep=true;
+            try{for(SelectionPolicy.Health candidate:ordered){if(candidate.id.equals(prior.id)||!candidate.eligibleForProof(now()))continue;if(attempted++>=4||now()>deadline)break;
+                Node replacement=findById(candidate.id);if(replacement!=null&&verifyCandidate(replacement,observation.failedMask)){
+                    record(prior).applicationFailed(now());pinned="";promote(replacement,true);app.log("health","APPLICATION_PATH_COMPARATIVE_RECOVERY");break;
+                }
+            }}finally{inSweep=false;}
+            if(current==prior)watchdogCode=ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT;
+        }
+        warnRetainedServicePath();publish();
+    }
     private void progress(String step,String message){stage=step;detail=message;publish();}
     private void finishChecks(){busy=false;stage="";if(current!=null&&phase.equals("connected")&&error.isEmpty())detail=connectedDetail();}
     private void probeServices(Node n)throws InterruptedException{
@@ -340,7 +405,7 @@ public final class VpnEngine {
     private void requestProviderRecovery(){
         ArrayList<String> failed=new ArrayList<>();
         for(Node node:nodes){SelectionPolicy.Health h=record(node);
-            if("octohide".equals(node.provider)&&h!=null&&h.latency<=0&&h.failures>=2)failed.add(node.name);}
+            if("octohide".equals(node.provider)&&h!=null&&h.latency<=0&&h.failures>=2&&h.appRejected&&!h.connectionFresh(now()))failed.add(node.name);}
         if(!failed.isEmpty())app.requestRecovery(failed);
     }
     private String quickSetup(String name)throws Exception{
@@ -377,6 +442,7 @@ public final class VpnEngine {
             // The bridge's log subscription uses the profile's info threshold,
             // independent of its error-only logcat sink. Keep only fixed codes.
             networkSignals.observe(log.optString("LogLevel"),text,now());
+            if(text.matches("(?s).*\\[(?:TCP|UDP)\\] dial AUTOPILOT \\(.*")&&(text.contains("timeout")||text.contains("unreachable")||text.contains("refused")))watchdog.routeError();
         }catch(JSONException ignored){}
     }
     private JSONObject selected(String name)throws JSONException{return new JSONObject().put("selected-map",new JSONObject().put("AUTOPILOT",name));}
@@ -439,15 +505,19 @@ public final class VpnEngine {
         UpdateRoute next=NO_UPDATE_ROUTE;long time=now();
         if(running.get()&&!stopping.get()&&nativeReady&&profileUsable&&tunReady&&current!=null&&"connected".equals(phase)){
             SelectionPolicy.Health active=record(current);Integer port=ports.get(current.id);
-            if(active!=null&&active.qualified(time)&&port!=null&&port>0&&port<=65535)
-                next=new UpdateRoute(port,time,Math.min(active.latencyAt+SelectionPolicy.LATENCY_TTL,active.servicesAt+SelectionPolicy.SERVICE_TTL));
+            if(active!=null&&currentUsable()&&port!=null&&port>0&&port<=65535)
+                next=new UpdateRoute(port,time,active.qualified(time)?Math.min(Math.max(active.latencyAt,active.transportAt)+SelectionPolicy.LATENCY_TTL,active.servicesAt+SelectionPolicy.SERVICE_TTL):active.transportAt+45_000);
         }
         updateRoute=next;
+        ConnectionWatchdog.Snapshot target=null;
+        if(running.get()&&!stopping.get()&&nativeReady&&profileUsable&&tunReady&&current!=null){Integer port=ports.get(current.id);if(port!=null)target=new ConnectionWatchdog.Snapshot(profileGeneration,current.id,selectionEpoch,port);}
+        if(!Objects.equals(monitorTarget,target)){monitorTarget=target;watchdog.target(target);}
         try{
             JSONArray rows=new JSONArray();ArrayList<SelectionPolicy.Health> ordered=new ArrayList<>(health.values());ordered.sort(SelectionPolicy.order(app.preferred()));
             for(SelectionPolicy.Health h:ordered){Node n=findById(h.id);if(n==null)continue;
                 HealthDiagnostics.Latency diagnostic=latencyDiagnostics.get(h.id);
-                JSONObject row=new JSONObject().put("name",h.name).put("country",h.country).put("provider",n.provider).put("latency",h.latency)
+                JSONObject row=new JSONObject().put("name",h.name).put("country",h.country).put("provider",n.provider).put("latency",h.displayLatency()).put("latencySource",h.displayLatency()==h.latency?"google-probe":"application-https")
+                    .put("nativeLatency",h.latency).put("applicationLatency",h.applicationLatency).put("applicationCheckedAt",h.transportAt)
                     .put("score",h.score()==Integer.MAX_VALUE?-1:h.score()).put("claude",h.claude).put("chatgpt",h.chatgpt).put("gemini",h.gemini)
                     .put("latencyAt",h.latencyAt).put("servicesAt",h.servicesAt).put("latencyFresh",h.latencyFresh(now())).put("qualified",h.qualified(now()))
                     .put("latencyCode",diagnostic==null?HealthDiagnostics.LatencyCode.NOT_TESTED.name():diagnostic.code.name())
@@ -458,6 +528,10 @@ public final class VpnEngine {
             JSONObject snapshot=new JSONObject().put("phase",phase).put("current",current==null?"":current.name).put("pinned",!pinned.isEmpty())
                 .put("auto",pinned.isEmpty()).put("busy",busy).put("error",error).put("detail",detail).put("stage",stage).put("lastSwitch",lastSwitch).put("nodes",rows).put("tun",tunReady);
             snapshot.put("coreBaselineAccepted",baselineAccepted).put("skippedCount",coreSkipped.size()).put("skippedNodes",skipped);
+            int cooldownCount=0;long nextEligible=0;for(SelectionPolicy.Health h:health.values())if(h.appRejected&&h.appFailureUntil>time){cooldownCount++;if(nextEligible==0||h.appFailureUntil<nextEligible)nextEligible=h.appFailureUntil;}
+            snapshot.put("watchdog",new JSONObject().put("code",watchdogCode.name()).put("lastCheckAt",watchdogLastCheck).put("lastSuccessAt",watchdogLastSuccess)
+                .put("failedOrigins",watchdogFailedOrigins).put("consecutiveFailures",watchdogConsecutive).put("cooldownCount",cooldownCount).put("nextEligibleAt",nextEligible)
+                .put("checkPath","per-node mixed listener; excluded Autopilot UID"));
             snapshot.put("coreProfileAccepted",profileUsable).put("nodeHealth",HealthDiagnostics.providers(rows)).put("networkSignals",networkSignals.json())
                 .put("checkPath","per-node mixed listener; excluded Autopilot UID").put("resolverPolicy",CoreDnsConfig.POLICY_ID).put("tunStack",TUN_STACK);
             JSONObject diagnostic=app.coreDiagnostic();if(diagnostic!=null)snapshot.put("coreDiagnostic",diagnostic);
@@ -467,7 +541,7 @@ public final class VpnEngine {
     }
     private void cleanup(){
         updateRoute=NO_UPDATE_ROUTE;
-        running.set(false);checks.close();
+        running.set(false);invalidateMonitor();watchdog.close();watchdogReachability.close();candidateReachability.close();checks.close();
         if(nativeReady){try{Clash.INSTANCE.stopTun();}catch(Throwable ignored){}try{Clash.INSTANCE.invokeAction(new JSONObject().put("id","stop-log").put("method","stopLog").put("data",JSONObject.NULL).toString(),(InvokeInterface)value->{});}catch(Throwable ignored){}
             try{Clash.INSTANCE.setEventListener((InvokeInterface)null);}catch(Throwable ignored){}}
         service.releaseTunnel();profileUsable=false;
