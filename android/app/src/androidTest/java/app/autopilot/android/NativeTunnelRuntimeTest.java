@@ -18,6 +18,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -39,7 +40,9 @@ public final class NativeTunnelRuntimeTest {
         assertNull("Grant emulator ACTIVATE_VPN appop before this test",VpnService.prepare(context));
         File ready=new File(context.getFilesDir(),"tunnel-probe-ready.json");
         File complete=new File(context.getFilesDir(),"tunnel-probe-complete");
-        Files.deleteIfExists(ready.toPath());Files.deleteIfExists(complete.toPath());
+        File readyTemporary=new File(context.getFilesDir(),"tunnel-probe-ready.json.tmp");
+        File completeTemporary=new File(context.getFilesDir(),"tunnel-probe-complete.tmp");
+        for(File handoff:List.of(ready,complete,readyTemporary,completeTemporary))Files.deleteIfExists(handoff.toPath());
         try {
             // Empty provider state prevents every external service/latency check. The actual
             // production service still establishes its ordinary Android routes and native TUN.
@@ -77,19 +80,25 @@ public final class NativeTunnelRuntimeTest {
             }).get(60,TimeUnit.SECONDS);
             JSONObject state=new JSONObject().put("uid",android.os.Process.myUid()).put("tun",app.state().optBoolean("tun"))
                 .put("sdk",Build.VERSION.SDK_INT).put("abi",Build.SUPPORTED_ABIS[0]);
-            Files.write(ready.toPath(),state.toString().getBytes(StandardCharsets.UTF_8));
+            try(FileOutputStream out=new FileOutputStream(readyTemporary)){
+                out.write(state.toString().getBytes(StandardCharsets.UTF_8));out.getFD().sync();
+            }
+            Files.move(readyTemporary.toPath(),ready.toPath(),StandardCopyOption.ATOMIC_MOVE);
             long probeDeadline=System.nanoTime()+120_000_000_000L;
             while(!complete.exists()&&System.nanoTime()<probeDeadline)Thread.sleep(100);
             assertTrue("Separate UID runner did not complete IPv4/IPv6/DNS/fake-IP probes",complete.isFile());
             assertEquals("PASS",new String(Files.readAllBytes(complete.toPath()),StandardCharsets.UTF_8).trim());
             System.out.println("AUTOPILOT_TUN_OTHER_UID_ACCEPTED "+state);
         }finally {
-            context.startService(new Intent(context,AutopilotVpnService.class).setAction(AutopilotVpnService.STOP));
-            long deadline=System.nanoTime()+15_000_000_000L;
-            while(app.engine!=null&&System.nanoTime()<deadline)Thread.sleep(100);
-            assertNull("Production VPN Stop cleanup",app.engine);
-            assertFalse("Production route state after Stop",app.state().optBoolean("tun"));
-            Files.deleteIfExists(ready.toPath());Files.deleteIfExists(complete.toPath());
+            try {
+                context.startService(new Intent(context,AutopilotVpnService.class).setAction(AutopilotVpnService.STOP));
+                long deadline=System.nanoTime()+15_000_000_000L;
+                while(app.engine!=null&&System.nanoTime()<deadline)Thread.sleep(100);
+                assertNull("Production VPN Stop cleanup",app.engine);
+                assertFalse("Production route state after Stop",app.state().optBoolean("tun"));
+            }finally {
+                for(File handoff:List.of(ready,complete,readyTemporary,completeTemporary))Files.deleteIfExists(handoff.toPath());
+            }
         }
     }
 

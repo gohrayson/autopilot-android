@@ -78,7 +78,7 @@ async function main() {
   if (!fixture.state.connections.some(connection => connection.host === 'fakeip-fixture.autopilot.test')) throw new Error('Native fake-IP reverse mapping did not restore the hostname at the SOCKS outbound.');
   if (queries.some(query => query.name === 'fakeip-fixture.autopilot.test')) throw new Error('Unfiltered fake-IP domain unexpectedly reached the real DNS fixture.');
   if (fixture.state.markerHits < 5 || fixture.state.unexpectedDestinations.length !== 0) throw new Error('Incomplete fixture traffic receipt.');
-  await adb('shell', 'run-as', app, 'sh', '-c', "'printf PASS > files/tunnel-probe-complete'");
+  await adb('shell', 'run-as', app, 'sh', '-c', "'printf PASS > files/tunnel-probe-complete.tmp && mv files/tunnel-probe-complete.tmp files/tunnel-probe-complete'");
   const status = await completion;
   await fs.writeFile(path.join(output, 'tunnel-instrumentation.log'), log);
   if (status !== 0 || !/OK \(1 test\)/.test(log) || /FAILURES!!!|INSTRUMENTATION_FAILED/.test(log)) throw new Error('Production TUN instrumentation did not pass: ' + log.slice(-8000));
