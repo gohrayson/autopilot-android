@@ -161,3 +161,72 @@ Artifact `12395201627` preserves the actual fixture, probes and logcat.
 The signed production APK uses the same production Java sources as this
 successful run. Following changes to this receipt and README are documentation
 only. No public 0.1.4 release was made on the strength of local tests alone.
+
+## Publication and physical phone verification
+
+```powershell
+node android/tools/publish-update.cjs --publish --notes-file .data/android-release-notes-014.txt
+```
+
+The publisher returned `published: true`. Independent GitHub API readback
+confirmed release `420217896`, tag `android-v0.1.4`, `draft: false`, and matching
+SHA-256 digests for every uploaded asset. APK size is 47,778,670 bytes with the
+hash above. The corresponding source ZIP SHA-256 is
+`5f753b98658c3848307b58a19256d9fbf86ba5fdba5aa50c193b3b85a4bb7860`.
+Release source commit is `1c79241` (documentation only after the successful
+runtime commit). Release: <https://github.com/gohrayson/autopilot-android/releases/tag/android-v0.1.4>.
+The existing feed URL remains unchanged.
+
+The installed phone was updated in place:
+
+```powershell
+& .data/android-tools/sdk/platform-tools/adb.exe -s 603f969d install -r dist/android/Autopilot-Android-0.1.4.apk
+```
+
+```text
+Performing Streamed Install
+Success
+versionCode=5 minSdk=26 targetSdk=35
+versionName=0.1.4
+```
+
+Android correctly refused a shell start of the private VPN service. The user
+started it through the app and confirmed `Connected`. The same shell UID
+remained covered by the new Autopilot VPN. After a diagnostic helper update
+that adds only allowlisted error class reporting, the same bounded strict-TLS
+requests returned:
+
+```text
+{"kind":"start","uid":2000}
+{"kind":"network","uid":2000,"label":"literal_tcp","result":"TCP_CONNECTED","status":0,"local_family":"ipv4","tun_source":true,"duration_ms":3}
+{"kind":"network","uid":2000,"label":"literal_https","result":"SOCKET_TIMEOUT","status":-1,"failure_class":"java.net.SocketTimeoutException","cause_classes":[],"tls_classification":"TLS_UNCLASSIFIED","duration_ms":5036}
+{"kind":"network","uid":2000,"label":"hostname_https","result":"HTTP_RESPONSE","status":204,"duration_ms":290}
+{"kind":"network","uid":2000,"label":"openai_https","result":"HTTP_RESPONSE","status":200,"duration_ms":468}
+{"kind":"complete","result":"FINISHED","uid":2000}
+```
+
+Thus actual HTTPS to the production latency endpoint and OpenAI responded on
+the phone through an excluded-owner, different-UID TUN path. The literal
+Cloudflare trace endpoint still timed out and is not counted as passing. An
+earlier immediate run had TLS failures while the connection was settling;
+those are also not counted as passing. The user independently confirmed that
+browsing and sending now work, and confirmed provider nodes in response to
+the OneVPN availability question.
+
+The original 0.1.2 updater classes, compiled from their published tag, also
+fetched and accepted the real public 0.1.4 feed. Exact invocation:
+
+```powershell
+& .data/hosted-update-probe/probe-legacy.ps1 -CompileOnly
+. .data/android-tools/env.ps1
+$jar=@(Get-ChildItem -LiteralPath (Join-Path $env:GRADLE_USER_HOME 'caches/modules-2/files-2.1/org.json/json/20240303') -Recurse -File -Filter json-20240303.jar)[0].FullName
+$cp=(Join-Path $PWD '.data/legacy-012-discovery/classes')+[IO.Path]::PathSeparator+$jar
+& (Join-Path $env:JAVA_HOME 'bin/java.exe') '-Dhttps.proxyHost=127.0.0.1' '-Dhttps.proxyPort=7890' -cp $cp app.autopilot.android.LegacyFeedProbe 'https://github.com/gohrayson/autopilot-android/releases/latest/download/latest.json' '0.1.4' '77409c8b3a087ccf10534925c518ad71c2e45429bb869ef173c7acc69b7a827e'
+```
+
+```text
+LEGACY_012_UPDATE_DISCOVERY_PASS version=0.1.4 versionCode=5 newerThanInstalled3=true Android16Supported=true sha256=77409c8b3a087ccf10534925c518ad71c2e45429bb869ef173c7acc69b7a827e
+```
+
+This section is post-publication evidence; the published source ZIP and release
+assets remain unchanged. The desktop VPN, proxy and running app were not altered.
