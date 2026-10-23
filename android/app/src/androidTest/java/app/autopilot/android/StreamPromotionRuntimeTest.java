@@ -57,6 +57,11 @@ public final class StreamPromotionRuntimeTest {
                 h.latencyAt=h.transportAt=h.servicesAt=h.appVerifiedAt=expired;
                 assertFalse(h.qualified(System.currentTimeMillis()));assertFalse(h.retainSelectedTransport(System.currentTimeMillis()));
                 fixture.firstEnabled.set(false);fixture.secondEnabled.set(true);
+                // Android HTTPS clients pool established CONNECT/TLS sessions. Stop
+                // those fixture control-check relays so stale proof cannot be renewed
+                // through a cached session after new authentication is disabled. The
+                // distinct numbered other-UID application stream is never touched.
+                fixture.closeControlChecks("first");
                 evidence.put("oldProofExpiredBeforeDiscovery",true);
             });
             int switches=events(app,"NODE_SWITCH"),upgrades=events(app,"HEALTHY_UPGRADE");long promotionStarted=System.nanoTime();
@@ -80,7 +85,7 @@ public final class StreamPromotionRuntimeTest {
                 .put("oldSocketMessagesAfterPromotion",fixture.afterPromotionAcks.get()).put("newSocketUsesSecondOutbound",true);
             // Only future connection attempts fail. The already established first-node
             // stream still runs until the real two-round HTTPS watchdog invokes REJECT.
-            fixture.secondEnabled.set(false);
+            fixture.secondEnabled.set(false);fixture.closeControlChecks("second");
             await(65000,()->events(app,"APPLICATION_PATH_FAILED")>0&&app.state().optString("current").isEmpty(),"Production watchdog confirmed broad failure");
             assertEquals("REJECT",nativeSelection());
             await(10000,fixture.streamClosed::get,"Confirmed recovery closes old native stream");
@@ -121,9 +126,9 @@ public final class StreamPromotionRuntimeTest {
         static final Set<String> HOSTS=Set.of("www.gstatic.com","api.openai.com","api.anthropic.com");
         final String marker="AUTOPILOT_STREAM_"+UUID.randomUUID();
         final ServerSocket listener=new ServerSocket(0,64,InetAddress.getByName("127.0.0.1"));
-        final Set<Socket> sockets=ConcurrentHashMap.newKeySet();final Set<String> tlsHosts=ConcurrentHashMap.newKeySet(),tlsByNode=ConcurrentHashMap.newKeySet(),deniedTargets=ConcurrentHashMap.newKeySet();
+        final Set<Socket> sockets=ConcurrentHashMap.newKeySet();final Map<Socket,String> controlChecks=new ConcurrentHashMap<>();final Set<String> tlsHosts=ConcurrentHashMap.newKeySet(),tlsByNode=ConcurrentHashMap.newKeySet(),deniedTargets=ConcurrentHashMap.newKeySet();
         final AtomicBoolean firstEnabled=new AtomicBoolean(true),secondEnabled=new AtomicBoolean(),promoted=new AtomicBoolean(),streamClosed=new AtomicBoolean(),closed=new AtomicBoolean();
-        final AtomicInteger acknowledged=new AtomicInteger(),afterPromotionAcks=new AtomicInteger(),freshSecondConnections=new AtomicInteger(),denied=new AtomicInteger();
+        final AtomicInteger acknowledged=new AtomicInteger(),afterPromotionAcks=new AtomicInteger(),freshSecondConnections=new AtomicInteger(),denied=new AtomicInteger(),privateDnsValidationRefused=new AtomicInteger();
         final AtomicLong tlsSent=new AtomicLong(),tlsReceived=new AtomicLong();final AtomicReference<String> failure=new AtomicReference<>();
         final ExecutorService workers=pool(16,64,"stream-socks"),pumps=pool(12,64,"stream-tls");final Thread accept;
         Fixture()throws IOException{accept=new Thread(()->{while(!closed.get())try{Socket client=listener.accept();sockets.add(client);workers.execute(()->serve(client));}catch(IOException failure){if(!closed.get())this.failure.compareAndSet(null,"ACCEPT_FAILED");}},"stream-fixture-accept");accept.setDaemon(true);accept.start();}
@@ -139,8 +144,15 @@ public final class StreamPromotionRuntimeTest {
                 int type=input.readUnsignedByte();String host;if(type==1){byte[] ip=new byte[4];input.readFully(ip);host=InetAddress.getByAddress(ip).getHostAddress();}else if(type==3){byte[] name=new byte[input.readUnsignedByte()];input.readFully(name);host=new String(name,StandardCharsets.US_ASCII).toLowerCase(Locale.ROOT);}else throw new IOException("ADDRESS_DENIED");int port=input.readUnsignedShort();
                 if(port==80&&"203.0.113.7".equals(host)){accepted(output);stream(client,input,output,username);return;}
                 if(port==80&&"203.0.113.8".equals(host)){accepted(output);String request=line(input);if(!("FRESH "+marker).equals(request))throw new IOException("FRESH_MARKER");output.write(("NEW "+username+" "+marker+"\n").getBytes(StandardCharsets.US_ASCII));output.flush();if("second".equals(username))freshSecondConnections.incrementAndGet();return;}
+                // Android validates Private DNS on the exact production TUN DNS
+                // address. The fixture never forwards that internal port externally.
+                if(port==853&&"172.19.0.2".equals(host)){privateDnsValidationRefused.incrementAndGet();output.write(new byte[]{5,2,0,1,0,0,0,0,0,0});output.flush();return;}
                 if(port!=443||!HOSTS.contains(host)){denied.incrementAndGet();if(deniedTargets.size()<32)deniedTargets.add(username+" "+host+":"+port);throw new IOException("DESTINATION_DENIED");}
+                controlChecks.put(client,username);
+                if(!enabled(username))return; // Close an auth-before-transition race as well.
                 remote=new Socket();sockets.add(remote);remote.connect(new InetSocketAddress(host,443),5000);remote.setSoTimeout(10000);accepted(output);tlsHosts.add(host);tlsByNode.add(username+" "+host);
+                controlChecks.put(remote,username);
+                if(!enabled(username))return;
                 byte[] prefix=new byte[3];input.readFully(prefix);if(prefix[0]!=22||prefix[1]!=3||(prefix[2]&255)>4){denied.incrementAndGet();throw new IOException("TLS_REQUIRED");}
                 remote.getOutputStream().write(prefix);remote.getOutputStream().flush();tlsSent.addAndGet(3);Socket upstream=remote;
                 Future<?> response=pumps.submit(()->copy(upstream,client,tlsReceived));copy(client,upstream,tlsSent);response.cancel(true);
@@ -158,9 +170,11 @@ public final class StreamPromotionRuntimeTest {
         private static String line(InputStream input)throws IOException{ByteArrayOutputStream bytes=new ByteArrayOutputStream();while(bytes.size()<512){int value=input.read();if(value<0)throw new EOFException();if(value=='\n')return bytes.toString(StandardCharsets.US_ASCII.name());bytes.write(value);}throw new IOException("LINE_LIMIT");}
         private static void accepted(OutputStream out)throws IOException{out.write(new byte[]{5,0,0,1,127,0,0,1,0,0});out.flush();}
         private static void copy(Socket source,Socket target,AtomicLong count){try{byte[] buffer=new byte[16384];int n;InputStream input=source.getInputStream();OutputStream output=target.getOutputStream();while((n=input.read(buffer))!=-1){output.write(buffer,0,n);output.flush();count.addAndGet(n);}}catch(IOException ignored){}finally{try{target.shutdownOutput();}catch(IOException ignored){}}}
-        private void closeSocket(Socket socket){sockets.remove(socket);try{socket.close();}catch(IOException ignored){}}
+        void closeControlChecks(String user){for(Map.Entry<Socket,String> entry:controlChecks.entrySet())if(user.equals(entry.getValue()))closeSocket(entry.getKey());}
+        private boolean enabled(String user){return "first".equals(user)?firstEnabled.get():secondEnabled.get();}
+        private void closeSocket(Socket socket){controlChecks.remove(socket);sockets.remove(socket);try{socket.close();}catch(IOException ignored){}}
         private static ExecutorService pool(int threads,int queued,String name){return new ThreadPoolExecutor(threads,threads,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(queued),job->{Thread thread=new Thread(job,name);thread.setDaemon(true);return thread;},new ThreadPoolExecutor.AbortPolicy());}
-        JSONObject stats()throws Exception{return new JSONObject().put("acknowledged",acknowledged.get()).put("afterPromotionAcks",afterPromotionAcks.get()).put("freshSecondConnections",freshSecondConnections.get()).put("streamClosed",streamClosed.get()).put("tlsHosts",new JSONArray(new TreeSet<>(tlsHosts))).put("tlsByNode",new JSONArray(new TreeSet<>(tlsByNode))).put("tlsSent",tlsSent.get()).put("tlsReceived",tlsReceived.get()).put("denied",denied.get()).put("deniedTargets",new JSONArray(new TreeSet<>(deniedTargets))).put("failure",failure.get()==null?"":failure.get()).put("openSockets",sockets.size()).put("closed",closed.get());}
+        JSONObject stats()throws Exception{return new JSONObject().put("acknowledged",acknowledged.get()).put("afterPromotionAcks",afterPromotionAcks.get()).put("freshSecondConnections",freshSecondConnections.get()).put("streamClosed",streamClosed.get()).put("tlsHosts",new JSONArray(new TreeSet<>(tlsHosts))).put("tlsByNode",new JSONArray(new TreeSet<>(tlsByNode))).put("tlsSent",tlsSent.get()).put("tlsReceived",tlsReceived.get()).put("privateDnsValidationRefused",privateDnsValidationRefused.get()).put("denied",denied.get()).put("deniedTargets",new JSONArray(new TreeSet<>(deniedTargets))).put("failure",failure.get()==null?"":failure.get()).put("openSockets",sockets.size()).put("closed",closed.get());}
         @Override public void close()throws Exception{closed.set(true);listener.close();accept.join(5000);for(Socket socket:sockets)closeSocket(socket);workers.shutdownNow();pumps.shutdownNow();assertTrue(workers.awaitTermination(6,TimeUnit.SECONDS));assertTrue(pumps.awaitTermination(6,TimeUnit.SECONDS));assertFalse(accept.isAlive());assertTrue(sockets.isEmpty());}
     }
 }
