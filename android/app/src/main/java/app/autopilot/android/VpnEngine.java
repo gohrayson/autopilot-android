@@ -27,6 +27,7 @@ public final class VpnEngine {
     private final ScheduledExecutorService nativeDeadlines=Executors.newSingleThreadScheduledExecutor();
     private final Semaphore nativeDelayPermits=new Semaphore(8);
     private final DiscoveryCoordinator<Node> discovery;
+    private final SelectedProviderRecovery selectedProviderRecovery;
     private DiscoveryCoordinator.State discoveryState;
     private String discoveryCode="";
     private final ConnectionWatchdog watchdog=new ConnectionWatchdog(watchdogReachability,this::watchdogResult);
@@ -70,7 +71,7 @@ public final class VpnEngine {
     private long lastSweep;
     private long lastCurrentCheck,lastVerify,nextRecovery;private int recoveryAttempt,exploreCursor;private long nextTick;
     private File home;
-    public VpnEngine(AutopilotVpnService service,AutopilotApp app){this.service=service;this.app=app;this.discovery=createDiscovery();}
+    public VpnEngine(AutopilotVpnService service,AutopilotApp app){this.service=service;this.app=app;this.discovery=createDiscovery();this.selectedProviderRecovery=new SelectedProviderRecovery(app::requestRecovery,()->app.log("provider","RECOVERY_QUEUE_FAILED"));}
     private DiscoveryCoordinator<Node> createDiscovery(){
         return new DiscoveryCoordinator<>(new DiscoveryCoordinator.Scheduler(){
             public void execute(Runnable job){submit(job::run);}
@@ -477,6 +478,9 @@ public final class VpnEngine {
         if(observation.code==ConnectionWatchdog.Code.HEALTHY&&record(current).qualified(now())&&"SERVICE_PATH_DEGRADED".equals(error)){error="";detail=connectedDetail();}
         if(observation.code==ConnectionWatchdog.Code.HEALTHY)record(current).selectedHealthy(observation.at);else record(current).selectedUncertain();
         if(observation.code==ConnectionWatchdog.Code.CONFIRMED_FAILED){
+            // Capture the selected export before REJECT clears current. A successful
+            // Google RTT does not contradict repeated independent HTTPS failure.
+            selectedProviderRecovery.confirmed(observation.snapshot,current,observation.code,false);
             record(current).applicationFailed(now());pinned="";watchdogCode=ConnectionWatchdog.Code.RECOVERING;
             phase="degraded";error="APPLICATION_PATH_FAILED";detail="Application connections failed repeatedly; checking replacements";app.log("health","APPLICATION_PATH_FAILED");publish();
             if(current!=null&&record(current).appRejected){rejectCurrent();watchdogCode=ConnectionWatchdog.Code.NO_VERIFIED_REPLACEMENT;}
@@ -489,7 +493,9 @@ public final class VpnEngine {
             inSweep=true;
             try{for(SelectionPolicy.Health candidate:ordered){if(candidate.id.equals(prior.id)||!candidate.eligibleForProof(now()))continue;if(attempted++>=ProductContract.policyInt("comparativeCandidateLimit")||now()>deadline)break;
                 Node replacement=findById(candidate.id);if(replacement!=null&&verifyCandidate(replacement,observation.failedMask)){
-                    record(prior).applicationFailed(now());pinned="";promote(replacement,true);app.log("health","APPLICATION_PATH_COMPARATIVE_RECOVERY");break;
+                    record(prior).applicationFailed(now());pinned="";promote(replacement,true);
+                    selectedProviderRecovery.confirmed(observation.snapshot,prior,observation.code,true);
+                    app.log("health","APPLICATION_PATH_COMPARATIVE_RECOVERY");break;
                 }
             }}finally{inSweep=false;}
             if(current==prior)watchdogCode=ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT;
