@@ -25,7 +25,7 @@ public class DiscoveryCoordinatorTest {
         final Set<String> nativeGood=new HashSet<>(),fallbackGood=new HashSet<>(),transportBad=new HashSet<>(),serviceBad=new HashSet<>(),promotionBad=new HashSet<>();
         final Map<String,Integer> nativeMillis=new HashMap<>();
         DiscoveryCoordinator.State state;
-        long firstPromotion,lastSwitch,watchdogAt;int nativeActive,nativePeak,fallbackActive,fallbackPeak,proofActive,proofPeak,promotions,forceComparisons,nativeRecords,serviceRecords,watchdogApplied,ended;
+        long firstPromotion,lastSwitch,watchdogAt;int nativeActive,nativePeak,fallbackActive,fallbackPeak,proofActive,proofPeak,promotions,forceComparisons,nativeRecords,serviceRecords,watchdogApplied,ended,closedConnections;
         String current="";boolean paused,pinned;long nativeDelay=5000,goodDelay=1000;
         Fixture(int count){this(count,60_000);}
         Fixture(int count,long budgetMillis){
@@ -69,6 +69,7 @@ public class DiscoveryCoordinatorTest {
             if(best==null||!best.id.equals(node))return;
             if(needsRoute()||finalComparison&&SelectionPolicy.shouldSwitch(current.isEmpty()?null:health.get(current),h,List.of(),now(),lastSwitch,force)){
                 if(promotionBad.contains(node)){h.applicationFailed(now());throw new IllegalStateException("FIXTURE_SELECTOR_REJECTED");}
+                if(VpnEngine.automaticPromotionClosesExisting(current.isEmpty()?null:health.get(current)))closedConnections++;
                 current=node;lastSwitch=now();if(firstPromotion==0)firstPromotion=now();promotions++;if(finalComparison&&force)forceComparisons++;events.add("PROMOTE:"+node);
             }
         }
@@ -122,6 +123,25 @@ public class DiscoveryCoordinatorTest {
         Fixture f=new Fixture(2);f.healthyCurrent("node-00");f.nativeGood.addAll(f.nodes);f.nativeMillis.put("node-00",1000);f.nativeMillis.put("node-01",20);f.goodDelay=100;
         f.start(true);f.clock.until(1_000_450);assertEquals("node-00",f.current);assertEquals(0,f.promotions);
         f.clock.until(1_005_000);assertEquals("node-01",f.current);assertEquals(1,f.promotions);assertEquals(1,f.forceComparisons);assertEquals("DISCOVERY_COMPLETED",f.state.code);
+    }
+    @Test public void expiredSelectedProofAllowsFreshDiscoveryPromotionWithoutClosingExistingStreams(){
+        Fixture f=new Fixture(2);f.healthyCurrent("node-00");
+        f.clock.until(f.now()+Math.max(SelectionPolicy.SERVICE_TTL,SelectionPolicy.LATENCY_TTL)+1);
+        SelectionPolicy.Health old=f.health.get("node-00");
+        assertFalse(old.qualified(f.now()));assertFalse(old.retainSelectedTransport(f.now()));assertFalse(old.appRejected);
+        f.nativeGood.add("node-01");f.start(false);f.clock.until(f.now()+5000);
+        assertEquals("node-01",f.current);assertEquals(1,f.promotions);assertEquals(0,f.closedConnections);
+        assertTrue(f.health.get("node-01").qualified(f.now()));assertFalse(old.appRejected);
+    }
+    @Test public void confirmedRejectedSelectionStillClosesConnectionsForFreshDiscoveryRecovery(){
+        Fixture f=new Fixture(2);f.healthyCurrent("node-00");f.health.get("node-00").applicationFailed(f.now());
+        assertTrue(f.health.get("node-00").appRejected);
+        f.nativeGood.add("node-01");f.start(false);f.clock.until(f.now()+5000);
+        assertEquals("node-01",f.current);assertEquals(1,f.promotions);assertEquals(1,f.closedConnections);
+    }
+    @Test public void initialFreshDiscoverySelectionRetainsItsExplicitCloseDisposition(){
+        Fixture f=new Fixture(1);f.nativeGood.add("node-00");f.start(false);f.clock.until(f.now()+5000);
+        assertEquals("node-00",f.current);assertEquals(1,f.closedConnections);
     }
     @Test public void budgetCutDuringFinalProofResumesThatComparisonWithoutLosingForce(){
         Fixture f=new Fixture(2,3100);f.healthyCurrent("node-00");f.nativeGood.addAll(f.nodes);f.nativeMillis.put("node-00",1000);f.nativeMillis.put("node-01",950);f.start(true);

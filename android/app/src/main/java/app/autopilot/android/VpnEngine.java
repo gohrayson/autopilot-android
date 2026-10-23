@@ -119,7 +119,7 @@ public final class VpnEngine {
                 if(!pinned.isEmpty()&&current!=null&&pinned.equals(current.id)&&currentUsable())return;
                 SelectionPolicy.Health best=SelectionPolicy.best(health.values(),app.preferred(),now());
                 if(best==null||!best.id.equals(node.id))return;
-                if(needsRoute()||finalComparison&&shouldSwitch(current==null?null:record(current),h,force))try{promote(node,current==null||!currentUsable());}
+                if(needsRoute()||finalComparison&&shouldSwitch(current==null?null:record(current),h,force))try{promote(node,automaticPromotionClosesExisting(current==null?null:record(current)));}
                 catch(Exception failure){if(running.get()&&!stopping.get()){h.applicationFailed(now());app.log("selection","CANDIDATE_PROMOTION_FAILED");}throw failure;}
             }
             public Node finalCandidate(Set<Node> attempted,boolean force){
@@ -391,7 +391,7 @@ public final class VpnEngine {
                 // Fresh evidence can reorder candidates. Compare the new winner before promotion.
                 continue;
             }
-            if(shouldSwitch(active,best,force)){promote(candidate,active==null||!active.qualified(now()));}
+            if(shouldSwitch(active,best,force)){promote(candidate,automaticPromotionClosesExisting(active));}
             return;
         }
     }
@@ -406,6 +406,10 @@ public final class VpnEngine {
         h.transportVerified(now(),result.latencyMillis);probeServices(node);if(!h.eligibleForProof(now()))return false;
         h.applicationVerified(now());return h.qualified(now());
     }
+    /** Ranking/proof expiry permits a fresh replacement, but does not prove that
+     * established streams failed. Only an absent or explicitly rejected selected
+     * route gives automatic promotion permission to close existing connections. */
+    static boolean automaticPromotionClosesExisting(SelectionPolicy.Health selected){return selected==null||selected.appRejected;}
     private void promote(Node node,boolean closeExisting)throws Exception{
         // Cancellation may yield read-only discovery, never a half-applied selector mutation.
         boolean cancellable;

@@ -5,4 +5,5 @@
         <activity android:name=".ProbeActivity" android:exported="false" />
     </application>
     <instrumentation android:name=".TunnelProbe" android:targetPackage="app.autopilot.probe" android:functionalTest="true" />
+    <instrumentation android:name=".StreamPromotionProbe" android:targetPackage="app.autopilot.probe" android:functionalTest="true" />
 </manifest>

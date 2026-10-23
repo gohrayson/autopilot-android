@@ -26,6 +26,7 @@ test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateCacheRunt
 test -f "$project/app/src/androidTest/java/app/autopilot/android/UpdateHttpsTransportRuntimeTest.java"
 test -f "$project/app/src/androidTest/java/app/autopilot/android/ReachabilityRuntimeTest.java"
 test -f "$project/app/src/androidTest/java/app/autopilot/android/ProductParityUiTest.java"
+test -f "$project/app/src/androidTest/java/app/autopilot/android/StreamPromotionRuntimeTest.java"
 adb wait-for-device
 adb logcat -c
 
@@ -105,3 +106,4 @@ if [[ "$xml_status" -ne 0 ]]; then exit "$xml_status"; fi
 node "$project/tools/ci-update-route-check.cjs" "$project" 2>&1 | tee "$results/update-https-runner.log"
 node "$project/tools/ci-tunnel-check.cjs" "$project" 2>&1 | tee "$results/tunnel-runner.log"
 node "$project/tools/ci-discovery-check.cjs" "$project" 2>&1 | tee "$results/discovery-runner.log"
+node "$project/tools/ci-stream-promotion-check.cjs" "$project" 2>&1 | tee "$results/stream-promotion-runner.log"
