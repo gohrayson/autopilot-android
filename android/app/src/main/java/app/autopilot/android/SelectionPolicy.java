@@ -58,14 +58,18 @@ public final class SelectionPolicy {
         public void selectedUncertain(){healthySince=lastHealthyAt=0;}
         public int displayLatency(){return displayLatency(Math.max(scoreAt,transportAt));}
         public int displayLatency(long now){return latencyFresh(now)?latency:applicationLatency>0&&now>=transportAt&&now-transportAt<=LATENCY_TTL?applicationLatency:-1;}
-        public boolean retainSelectedTransport(long now){return !appRejected&&applicationLatency>0&&transportAt>0&&now>=transportAt&&now-transportAt<=ProductContract.policyLong("transportRetentionMs");}
+        public boolean retainSelectedTransport(long now){return !appRejected&&now>=appFailureUntil&&applicationLatency>0&&applicationLatency<maxLatency&&transportAt>0&&now>=transportAt&&now-transportAt<=ProductContract.policyLong("transportRetentionMs");}
     }
     private static boolean excluded(String country){org.json.JSONArray countries=ProductContract.policy().optJSONArray("excludedCountries");for(int i=0;i<countries.length();i++)if(country.equals(countries.optString(i)))return true;return false;}
+    static boolean excludedCountry(String country){return excluded(country);}
     public static boolean usable(String verdict){return "ok".equals(verdict)||"challenged".equals(verdict);}
     public static int tier(String country,List<String> preferred){int i=preferred.indexOf(country);return i<0?preferred.size():i;}
     public static Comparator<Health> order(List<String> preferred){return order(preferred,-1);}
     public static Comparator<Health> order(List<String> preferred,long now){List<String> copy=List.copyOf(preferred);return Comparator.comparingInt((Health h)->tier(h.country,copy)).thenComparingDouble(h->now<0?h.score():h.score(now)).thenComparing(h->h.name);}
     public static Health best(Collection<Health> all,List<String> preferred,long now){return all.stream().filter(h->h.qualified(now)).min(order(preferred,now)).orElse(null);}
+    /** Keep the selected route in the comparison even when it was just proved;
+     * exclude failed proof/selector attempts so one winner cannot hide fallback. */
+    static Health bestForProof(Collection<Health> all,List<String> preferred,long now,Set<String> attempted,String selectedId){return all.stream().filter(h->h.eligibleForProof(now)&&(h.id.equals(selectedId)||!attempted.contains(h.id))).min(order(preferred,now)).orElse(null);}
     public static boolean shouldSwitch(Health current,Health candidate,List<String> preferred,long now,long lastSwitch,boolean force){return shouldSwitch(current,candidate,preferred,now,lastSwitch,force,DWELL,ProductContract.defaults().optDouble("switchRatio"));}
     public static boolean shouldSwitch(Health current,Health candidate,List<String> preferred,long now,long lastSwitch,boolean force,long dwell,double ratio){
         if(candidate==null||!candidate.qualified(now)||current!=null&&candidate.id.equals(current.id))return false;

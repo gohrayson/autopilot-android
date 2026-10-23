@@ -59,6 +59,11 @@ public class SelectionPolicyTest {
         var fastest=node("fastest","JP",30);var fallback=node("fallback","SG",90);fastest.applicationFailed(NOW);
         assertSame(fallback,SelectionPolicy.best(List.of(fastest,fallback),List.of("JP","SG"),NOW));
     }
+    @Test public void finalProofSkipsAttemptedWinnerButKeepsSelectedRouteAsRankingAnchor(){
+        var fastest=node("fastest","JP",30);var current=node("selected","JP",50);var slower=node("slower","JP",90);
+        assertSame(current,SelectionPolicy.bestForProof(List.of(fastest,current,slower),List.of(),NOW,Set.of("fastest","selected"),"selected"));
+        assertSame(slower,SelectionPolicy.bestForProof(List.of(fastest,slower),List.of(),NOW,Set.of("fastest"),""));
+    }
     @Test public void measuredApplicationTransportCanSustainGoogleOnlyOutageWithoutInventedRtt(){
         var h=node("a","JP",100);h.latency(-1,NOW+1);h.transportVerified(NOW+2,317);
         assertEquals(-1,h.latency);assertEquals(317,h.applicationLatency);assertEquals(317,h.displayLatency());assertTrue(h.qualified(NOW+2));
@@ -69,6 +74,11 @@ public class SelectionPolicyTest {
         assertFalse(h.qualified(later));assertFalse(h.eligibleForProof(later));assertTrue(h.retainSelectedTransport(later));
         h.servicesAt=later;h.chatgpt="unknown";assertFalse(h.qualified(later));assertTrue(h.retainSelectedTransport(later));
         assertFalse(h.retainSelectedTransport(later+45_001));h.applicationFailed(later);assertFalse(h.retainSelectedTransport(later));
+    }
+    @Test public void selectedTransportRetentionStillRequiresMeasuredLatencyBelowConfiguredCeiling(){
+        var h=node("active","JP",100);h.transportVerified(NOW+1,3000);assertFalse(h.retainSelectedTransport(NOW+1));
+        h.transportVerified(NOW+2,2999);assertTrue(h.retainSelectedTransport(NOW+2));
+        h.applicationFailed(NOW+3);assertFalse(h.retainSelectedTransport(NOW+3));
     }
     @Test public void candidateProofRetainsEscalationUntilSelectedHealthIsSustained(){
         var h=node("a","JP",100);h.applicationFailed(NOW);h.applicationVerified(NOW+60_001);assertEquals(1,h.appFailures);

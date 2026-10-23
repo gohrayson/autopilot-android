@@ -29,6 +29,7 @@ public final class MainActivity extends Activity {
     private TextView phase, selected, detail, connectionHealth, countries, oneStatus, octoStatus, importStatus, routingStatus, nodeSummary, error, updateSummary;
     private Switch globalMode;
     private AlertDialog updateDialog;
+    private AlertDialog reportDialog;
     private TextView updateDialogStatus, updateDialogNotes, updateProgressText, updateActionHint;
     private ProgressBar updateProgressBar;
     private Button updateCheck, updateDownload, updateInstall, updatePause;
@@ -94,8 +95,12 @@ public final class MainActivity extends Activity {
     @Override protected void onResume(){super.onResume();visible=true;app.listen(render);render();app.updates.connectionStateChanged();app.updates.foregroundCheck();handler.postDelayed(tick,3000);}
     @Override protected void onPause(){visible=false;app.unlisten(render);handler.removeCallbacks(tick);super.onPause();}
     @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);handleUpdateIntent(intent);}
-    @Override protected void onDestroy(){if(updateDialog!=null)updateDialog.dismiss();super.onDestroy();}
-    private void handleUpdateIntent(Intent intent){if(intent!=null&&intent.getBooleanExtra("openUpdates",false)){intent.removeExtra("openUpdates");handler.post(this::updatesDialog);}}
+    @Override protected void onDestroy(){if(updateDialog!=null)updateDialog.dismiss();if(reportDialog!=null)reportDialog.dismiss();super.onDestroy();}
+    private void handleUpdateIntent(Intent intent){
+        if(intent==null)return;
+        if(intent.getBooleanExtra("openDiagnostics",false)){intent.removeExtra("openDiagnostics");handler.post(this::diagnostics);}
+        else if(intent.getBooleanExtra("openUpdates",false)){intent.removeExtra("openUpdates");handler.post(this::updatesDialog);}
+    }
 
     private void render(){
         if(isFinishing())return;
@@ -130,7 +135,7 @@ public final class MainActivity extends Activity {
         error.setText(errorMessage(s.optString("error","")));error.setVisibility(error.getText().length()==0?View.GONE:View.VISIBLE);
         connect.setText(running?"Stop VPN":"Start VPN");connect.setEnabled(running||!app.providers.nodes().isEmpty());
         JSONObject common=app.settings();auto.setText(common.optBoolean("paused")||s.optBoolean("pinned")?"Resume Auto":"Pause Auto");
-        auto.setEnabled(running); retest.setEnabled(running&&!s.optBoolean("busy"));
+        auto.setEnabled(running); retest.setEnabled(running&&!p.equals("starting")&&!Set.of("profile","tunnel").contains(s.optString("stage")));
         globalMode.setChecked(common.optBoolean("globalMode"));
         String routing=common.optBoolean("globalMode")?"Global: captured traffic uses the VPN, except website overrides.":"Rule mode: website overrides, then regional direct routing, then VPN.";
         if(!common.optBoolean("globalMode")&&!AndroidRouting.geoAvailable(app))routing+=" Regional database unavailable: unmatched traffic uses the VPN.";
@@ -422,7 +427,7 @@ public final class MainActivity extends Activity {
     private EditText domainField(JSONArray values){EditText field=new EditText(this);field.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE);field.setMinLines(2);field.setText(String.join("\n",ProductSettings.strings(values)));field.setHint("example.com");return field;}
     private static JSONArray domainLines(String input){JSONArray result=new JSONArray();for(String line:input.split("[\\r\\n]+"))if(!line.trim().isEmpty())result.put(line.trim());return result;}
     private void diagnostics(){reportDialog("Diagnostics",app.diagnostics());}
-    private void reportDialog(String title,String report){TextView text=text(report,12,INK);text.setTextIsSelectable(true);text.setPadding(dp(18),dp(8),dp(18),dp(8));ScrollView scroll=new ScrollView(this);scroll.addView(text);new AlertDialog.Builder(this).setTitle(title).setView(scroll).setPositiveButton("Copy",(d,w)->{((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Autopilot "+title,report));toast("Copied "+title.toLowerCase(Locale.ROOT));}).setNeutralButton("Share",(d,w)->{Intent share=new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT,"Autopilot "+title).putExtra(Intent.EXTRA_TEXT,report);startActivity(Intent.createChooser(share,"Share "+title.toLowerCase(Locale.ROOT)));}).setNegativeButton("Close",null).show();}
+    private void reportDialog(String title,String report){if(reportDialog!=null)reportDialog.dismiss();TextView text=text(report,12,INK);text.setTextIsSelectable(true);text.setPadding(dp(18),dp(8),dp(18),dp(8));ScrollView scroll=new ScrollView(this);scroll.addView(text);reportDialog=new AlertDialog.Builder(this).setTitle(title).setView(scroll).setPositiveButton("Copy",(d,w)->{((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Autopilot "+title,report));toast("Copied "+title.toLowerCase(Locale.ROOT));}).setNeutralButton("Share",(d,w)->{Intent share=new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT,"Autopilot "+title).putExtra(Intent.EXTRA_TEXT,report);startActivity(Intent.createChooser(share,"Share "+title.toLowerCase(Locale.ROOT)));}).setNegativeButton("Close",null).show();}
     private void about(){String license="Autopilot Android "+BuildConfig.VERSION_NAME+"\n\nMihomo v1.19.32 · libmihomo-android v0.3.11\nGPL-3.0. Android source and build instructions are included with this APK release.\n\nSnakeYAML: Apache-2.0. Kotlin: Apache-2.0.\n\n";for(String file:List.of("COPYING","APACHE-2.0.txt")){try(InputStream in=getAssets().open(file)){license+=readText(in,100000)+"\n\n";}catch(IOException ignored){}}TextView text=text(license,12,INK);text.setPadding(dp(18),0,dp(18),0);ScrollView scroll=new ScrollView(this);scroll.addView(text);new AlertDialog.Builder(this).setTitle("About & licenses").setView(scroll).setPositiveButton("Close",null).show();}
     private static String readText(InputStream input,int limit)throws IOException{
         if(input==null)throw new IOException("Could not open configuration");

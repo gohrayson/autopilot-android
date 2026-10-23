@@ -19,6 +19,16 @@ public final class VpnEngine {
     private final ScheduledExecutorService worker=Executors.newSingleThreadScheduledExecutor();
     private final ServiceChecks checks=new ServiceChecks();
     private final ReachabilityChecks candidateReachability=new ReachabilityChecks(),watchdogReachability=new ReachabilityChecks();
+    private final ReachabilityChecks discoveryReachability=new ReachabilityChecks();
+    private final ReachabilityChecks[] discoveryFallback={new ReachabilityChecks(),new ReachabilityChecks()};
+    private final ServiceChecks discoveryServices=new ServiceChecks();
+    private final ExecutorService discoveryProofWorker=Executors.newSingleThreadExecutor();
+    private final ExecutorService[] discoveryFallbackWorkers={Executors.newSingleThreadExecutor(),Executors.newSingleThreadExecutor()};
+    private final ScheduledExecutorService nativeDeadlines=Executors.newSingleThreadScheduledExecutor();
+    private final Semaphore nativeDelayPermits=new Semaphore(8);
+    private final DiscoveryCoordinator<Node> discovery;
+    private DiscoveryCoordinator.State discoveryState;
+    private String discoveryCode="";
     private final ConnectionWatchdog watchdog=new ConnectionWatchdog(watchdogReachability,this::watchdogResult);
     private volatile ConnectionWatchdog.Snapshot monitorTarget;
     private long profileGeneration,selectionEpoch;
@@ -31,6 +41,8 @@ public final class VpnEngine {
     private final HealthDiagnostics.NetworkSignals networkSignals=new HealthDiagnostics.NetworkSignals();
     private final Map<String,Integer> ports=new HashMap<>();
     private final AtomicLong sequence=new AtomicLong();
+    private final AtomicLong requestedRetest=new AtomicLong();
+    private long lastAppliedRetestId;
     private final Object operationLock=new Object();
     private volatile Thread activeThread;
     private volatile boolean inSweep;
@@ -58,7 +70,85 @@ public final class VpnEngine {
     private long lastSweep;
     private long lastCurrentCheck,lastVerify,nextRecovery;private int recoveryAttempt,exploreCursor;private long nextTick;
     private File home;
-    public VpnEngine(AutopilotVpnService service,AutopilotApp app){this.service=service;this.app=app;}
+    public VpnEngine(AutopilotVpnService service,AutopilotApp app){this.service=service;this.app=app;this.discovery=createDiscovery();}
+    private DiscoveryCoordinator<Node> createDiscovery(){
+        return new DiscoveryCoordinator<>(new DiscoveryCoordinator.Scheduler(){
+            public void execute(Runnable job){submit(job::run);}
+            public void later(Runnable job,long delay){if(running.get())try{worker.schedule(()->guard(job::run),delay,TimeUnit.MILLISECONDS);}catch(RejectedExecutionException ignored){}}
+        },new DiscoveryCoordinator.Driver<Node>(){
+            public long now(){return VpnEngine.now();}
+            public CompletionStage<HealthDiagnostics.Latency> nativeProbe(Node node){
+                try{return testDelayAsync(node).handle((result,failure)->HealthDiagnostics.threshold(failure==null?HealthDiagnostics.latency(result):HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CHECK_TIMEOUT),(int)settingLong("maxLatencyMs")));}
+                catch(Exception failure){return failedFuture(failure);}
+            }
+            public CompletionStage<Integer> fallback(Node node,int lane){
+                Integer port=ports.get(node.id);if(port==null)return CompletableFuture.completedFuture(0);
+                return background(discoveryFallbackWorkers[lane],()->{ConnectionWatchdog.Result result=discoveryFallback[lane].check(port);return !result.broadFailure()&&result.latencyMillis>0&&result.latencyMillis<settingLong("maxLatencyMs")?result.latencyMillis:0;});
+            }
+            public CompletionStage<ConnectionWatchdog.Result> transport(Node node){
+                Integer port=ports.get(node.id);if(port==null)return CompletableFuture.completedFuture(new ConnectionWatchdog.Result(7));
+                return background(discoveryProofWorker,()->discoveryReachability.check(port));
+            }
+            public CompletionStage<ServiceChecks.Result> services(Node node){
+                Integer port=ports.get(node.id);List<String> required=required();
+                if(port==null)return failedFuture(new IOException("NODE_UNAVAILABLE"));
+                return background(discoveryProofWorker,()->discoveryServices.check(port,required));
+            }
+            public boolean recordNative(Node node,HealthDiagnostics.Latency sample){if(record(node)==null)return false;recordLatency(node,sample);if(current!=null&&current.id.equals(node.id))lastCurrentCheck=now();return sample.millis>0&&sample.millis<settingLong("maxLatencyMs");}
+            public boolean recordFallback(Node node,int millis){SelectionPolicy.Health h=record(node);if(h==null||millis<=0||millis>=settingLong("maxLatencyMs"))return false;h.transportVerified(now(),millis);return true;}
+            public boolean recordTransport(Node node,ConnectionWatchdog.Result result){
+                SelectionPolicy.Health h=record(node);if(h==null)return false;
+                if(result.broadFailure()){
+                    // A selected route has a two-round independent watchdog. A
+                    // single discovery proof must not bypass that confirmation.
+                    if(current==null||!current.id.equals(node.id))h.applicationFailed(now());
+                    app.log("health","CANDIDATE_APPLICATION_PATH_FAILED");return false;
+                }
+                if((result.failedMask&6)!=0||result.latencyMillis<=0)return false;
+                h.transportVerified(now(),result.latencyMillis);return true;
+            }
+            public boolean recordServices(Node node,ServiceChecks.Result result){SelectionPolicy.Health h=record(node);if(h==null)return false;h.claude=result.claude;h.chatgpt=result.chatgpt;h.gemini=result.gemini;h.servicesAt=now();if(current!=null&&current.id.equals(node.id))lastVerify=h.servicesAt;return h.eligibleForProof(now());}
+            public boolean canProve(Node node){SelectionPolicy.Health h=record(node);return h!=null&&!SelectionPolicy.excludedCountry(h.country)&&now()>=h.appFailureUntil&&h.connectionFresh(now());}
+            public Comparator<Node> order(){return Comparator.comparingInt((Node n)->SelectionPolicy.tier(n.country,app.preferred())).thenComparingDouble(n->record(n).connectionScore(now())).thenComparing(n->n.name);}
+            public boolean needsRoute(){return !paused()&&(current==null||!currentUsable());}
+            public int proofLimit(){return Math.max((int)settingLong("checkTopK"),app.preferred().size()+1);}
+            public void proved(Node node,boolean finalComparison,boolean force)throws Exception{
+                SelectionPolicy.Health h=record(node);if(h==null||!h.eligibleForProof(now()))return;h.applicationVerified(now());
+                if(paused())return;
+                if(!pinned.isEmpty()&&current!=null&&pinned.equals(current.id)&&currentUsable())return;
+                SelectionPolicy.Health best=SelectionPolicy.best(health.values(),app.preferred(),now());
+                if(best==null||!best.id.equals(node.id))return;
+                if(needsRoute()||finalComparison&&shouldSwitch(current==null?null:record(current),h,force))try{promote(node,current==null||!currentUsable());}
+                catch(Exception failure){if(running.get()&&!stopping.get()){h.applicationFailed(now());app.log("selection","CANDIDATE_PROMOTION_FAILED");}throw failure;}
+            }
+            public Node finalCandidate(Set<Node> attempted,boolean force){
+                if(paused()||!pinned.isEmpty()&&current!=null&&pinned.equals(current.id)&&currentUsable())return null;
+                Set<String> tried=new HashSet<>();for(Node node:attempted)tried.add(node.id);
+                SelectionPolicy.Health best=SelectionPolicy.bestForProof(health.values(),app.preferred(),now(),tried,current==null?"":current.id);
+                if(best==null||current!=null&&best.id.equals(current.id))return null;
+                Node candidate=findById(best.id);return candidate==null||attempted.contains(candidate)?null:candidate;
+            }
+            public void ended(boolean complete,boolean force){
+                lastSweep=now();finishChecks();if(complete)requestProviderRecovery();
+                if(current!=null&&!record(current).appRejected){phase="connected";if(currentUsable()){error="";detail=connectedDetail();warnRetainedServicePath();}else detail="Checking the selected connection; discovery continues in the background";}
+                else{phase="degraded";error="NO_HEALTHY_NODE";detail="No verified connection yet. Discovery will resume after a short pause; unverified traffic stays blocked.";scheduleRecovery();}
+                publish();
+            }
+            public void progress(DiscoveryCoordinator.State state){
+                if(!state.code.equals(discoveryCode)){discoveryCode=state.code;app.log("discovery",discoveryCode);}
+                discoveryState=state;busy=state.active;
+                if(state.active){stage="connections";if(current==null){phase="testing";detail="Checking connections · "+Math.min(state.cursor,state.total*state.passes)+" of "+(state.total*state.passes)+" checks scheduled";}else{phase="connected";detail=connectedDetail()+" · checking other nodes in background";}}
+                else if(current!=null&&phase.equals("connected"))finishChecks();
+                publish();
+            }
+            public void failed(Throwable failure){if(running.get())app.log("discovery","DISCOVERY_CHECK_FAILED");}
+        },ProductContract.policyLong("discoveryBudgetMs"),ProductContract.policyInt("forcedSweepPasses"),ProductContract.policyInt("latencyRetryCount"));
+    }
+    private static <T>CompletableFuture<T> background(ExecutorService executor,Callable<T> operation){
+        CompletableFuture<T> result=new CompletableFuture<>();
+        try{executor.execute(()->{try{result.complete(operation.call());}catch(Throwable failure){result.completeExceptionally(failure);}});}catch(RejectedExecutionException failure){result.completeExceptionally(failure);}return result;
+    }
+    private static <T>CompletableFuture<T> failedFuture(Throwable failure){CompletableFuture<T> result=new CompletableFuture<>();result.completeExceptionally(failure);return result;}
     /** Thread-safe updater snapshot. The caller uses direct only after this engine is removed. */
     public int updateProxyPort(){
         UpdateRoute route=updateRoute;long time=now();
@@ -91,16 +181,17 @@ public final class VpnEngine {
         establish(false);startedOnce=true;profileUsable=true;
         worker.scheduleWithFixedDelay(()->guard(()->{if(now()>=nextTick){try{tick();}finally{nextTick=now()+settingLong("tickMs");}}}),1000,1000,TimeUnit.MILLISECONDS);
         if(nodes.isEmpty()){busy=false;stage="";noNodes();publish();}
-        else sweep(true);
+        else sweep(false);
     });}
     public void stop(){
         if(!stopping.compareAndSet(false,true))return;
+        discovery.close();cancelDiscoveryNetwork();
         monitorTarget=null;watchdog.close();watchdogReachability.close();candidateReachability.close();checks.cancelActive();
         updateRoute=NO_UPDATE_ROUTE;
         running.set(false);Thread thread=activeThread;if(thread!=null)thread.interrupt();
         try{worker.execute(()->{Thread.interrupted();cleanup();});}catch(RejectedExecutionException ignored){cleanup();}
     }
-    public void retest(){if(!profileUsable||nodes.isEmpty()&&!coreSkipped.isEmpty())nodesChanged();else queueSweep(true);}
+    public void retest(){requestedRetest.incrementAndGet();forceSweepRequested.set(true);if(!profileUsable||nodes.isEmpty()&&!coreSkipped.isEmpty())nodesChanged();else queueSweep(true);}
     public void select(String name,boolean pin){preemptSweep();submit(()->{
         if(!profileUsable){nodesChanged();return;}
         Node target=findByName(name);if(target==null){error="NODE_UNAVAILABLE";publish();return;}
@@ -112,8 +203,8 @@ public final class VpnEngine {
             else{phase="connected";error="";detail=connectedDetail();}
         }finally{finishChecks();publish();}
     });}
-    public void resumeAuto(){app.setSettings(safePatch("paused",false));preemptSweep();submit(()->{pinned="";if(!profileUsable||nodes.isEmpty()&&!coreSkipped.isEmpty()){nodesChanged();return;}error="";decide(true);if(current!=null&&phase.equals("connected"))detail=connectedDetail();queueSweep(false);publish();});}
-    public void pauseAuto(){app.setSettings(safePatch("paused",true));submit(()->{detail="Auto paused; the current connection remains selected";publish();});}
+    public void resumeAuto(){app.setSettings(safePatch("paused",false));preemptSweep();submit(()->{pinned="";if(!profileUsable||nodes.isEmpty()&&!coreSkipped.isEmpty()){nodesChanged();return;}error="";if(current!=null&&phase.equals("connected"))detail=connectedDetail();queueSweep(false);publish();});}
+    public void pauseAuto(){app.setSettings(safePatch("paused",true));preemptSweep();submit(()->{discovery.cancelled();finishChecks();detail="Auto paused; the current connection remains selected";publish();});}
     private static JSONObject safePatch(String key,Object value){try{return new JSONObject().put(key,value);}catch(JSONException impossible){throw new IllegalArgumentException(impossible);}}
     public void settingsChanged(){preferencesChanged();}
     private long settingLong(String key){return app.settings().optLong(key);}
@@ -123,7 +214,7 @@ public final class VpnEngine {
     public void preferencesChanged(){
         if(!preferencesQueued.compareAndSet(false,true))return;
         preemptSweep();
-        submit(()->{preferencesQueued.set(false);syncHealth();if(reconcileRoutingSettings(installedRules,app.settings(),AndroidRouting.geoAvailable(app),()->nodesChanged(true))){publish();return;}if(!profileUsable){nodesChanged();return;}if(!pinned.isEmpty()||paused()){publish();return;}decide(false);queueSweep(false);publish();});
+        submit(()->{preferencesQueued.set(false);discovery.cancelled();syncHealth();if(reconcileRoutingSettings(installedRules,app.settings(),AndroidRouting.geoAvailable(app),()->nodesChanged(true))){publish();return;}if(!profileUsable){nodesChanged();return;}if(!pinned.isEmpty()||paused()){publish();return;}queueSweep(false);publish();});
     }
     public void nodesChanged(){nodesChanged(false);}
     private void nodesChanged(boolean forceRouting){
@@ -131,15 +222,17 @@ public final class VpnEngine {
         if(!nodesQueued.compareAndSet(false,true))return;
         preemptSweep();
         submit(()->{
-            nodesQueued.set(false);boolean forceRoutingReload=routingReloadQueued.getAndSet(false);List<Node> latest=validatedNodes();
-            if(sameNodes(nodes,latest)&&profileUsable&&!forceRoutingReload)return;
+            nodesQueued.set(false);discovery.cancelled();boolean forceRoutingReload=routingReloadQueued.getAndSet(false);List<Node> latest=validatedNodes();
+            if(sameNodes(nodes,latest)&&profileUsable&&!forceRoutingReload){queueSweep(false);return;}
             String prior=current==null?"":current.id,priorPin=pinned;
             final Node[] survivor={null};final String[] selectedName={"REJECT"};
             final ProfileValidation.Result[] validated={null};
             boolean accepted=reloadSafely(new ProfileTransition(){
                 @Override public void pause(){
                     invalidateMonitor();profileGeneration++;
-                    for(SelectionPolicy.Health h:health.values()){h.transportAt=0;h.applicationLatency=-1;}
+                    // Node IDs include the complete outbound configuration. A surviving
+                    // ID keeps its ledger; only a matching new watchdog snapshot can
+                    // refresh selected-route proof after this profile generation.
                     updateRoute=NO_UPDATE_ROUTE;
                     profileUsable=false;tunReady=false;current=null;pinned="";busy=true;phase="testing";
                     stage="profile";detail="Updating VPN profile; traffic is paused";publish();
@@ -168,7 +261,7 @@ public final class VpnEngine {
             if(accepted){
                 profileUsable=true;current=survivor[0];pinned=current!=null&&priorPin.equals(current.id)?priorPin:"";
                 phase=current==null?"testing":"connected";error="";detail=current==null?"Provider nodes updated; checking health":connectedDetail();
-                if(nodes.isEmpty())noNodes();else queueSweep(true);
+                if(nodes.isEmpty())noNodes();else queueSweep(false);
             }else{
                 profileUsable=false;current=null;pinned="";phase="degraded";error=validated[0]==null?"CORE_CONFIG_REJECTED":rejectionCode(validated[0]);
                 String message=CoreDiagnostics.messageForCode(error);detail=(message==null?"The VPN profile was rejected.":message)+" VPN is blocking traffic.";
@@ -231,7 +324,8 @@ public final class VpnEngine {
         }}
         finally{synchronized(operationLock){activeThread=null;preempted=false;Thread.interrupted();}}
     }
-    private void preemptSweep(){synchronized(operationLock){if(inSweep&&activeThread!=null){preempted=true;activeThread.interrupt();}}}
+    private void preemptSweep(){discovery.invalidate();cancelDiscoveryNetwork();synchronized(operationLock){if(inSweep&&activeThread!=null){preempted=true;activeThread.interrupt();}}}
+    private void cancelDiscoveryNetwork(){discoveryReachability.cancel();for(ReachabilityChecks lane:discoveryFallback)lane.cancel();discoveryServices.cancelActive();}
     private void failure(String code){
         updateRoute=NO_UPDATE_ROUTE;
         boolean guarded=startedOnce&&service.hasTunnel();
@@ -247,60 +341,32 @@ public final class VpnEngine {
         submit(()->{sweepQueued.set(false);boolean requestedForce=forceSweepRequested.getAndSet(false);
             if(!profileUsable)return;
             if(preferencesQueued.get()||nodesQueued.get()){queueSweep(requestedForce);return;}
-            sweep(requestedForce);
+            sweep(requestedForce,requestedRetest.get());
         });
     }
     private void tick()throws Exception{
         if(!tunReady||!profileUsable)return;
-        // Native RTT and independent application HTTPS are distinct measurements.
-        // The watchdog continues on its own lane while this serialized discovery runs.
-        if(current!=null){
-            Node checked=current;probeLatency(checked);SelectionPolicy.Health h=record(checked);
-            if(!h.connectionFresh(now())&&h.failures>=settingLong("failLimit")&&!paused()){
-                h.applicationFailed(now());pinned="";decide(true);if(current==checked)rejectCurrent();scheduleRecovery();
-            }
-        }
-        if(current!=null&&now()-lastVerify>=settingLong("verifyMs")){lastVerify=now();probeServices(current);if(!record(current).qualified(now())){decide(false);warnRetainedServicePath();}}
-        if(current==null&&!paused()&&now()>=nextRecovery)recoverBounded();
+        // The same eight-permit async window serves current-route RTT. Independent
+        // HTTPS watchdog proof, not an expired/failed Google RTT alone, decides
+        // whether a previously verified route has actually failed.
+        if(current!=null)discovery.priority(current);
+        if(current!=null&&now()-lastVerify>=settingLong("verifyMs")){lastVerify=now();probeServices(current);if(!record(current).qualified(now())){queueSweep(false);warnRetainedServicePath();}}
+        if(current==null&&!paused()&&now()>=nextRecovery)queueSweep(false);
         if(now()-lastSweep>=settingLong("sweepMs"))queueSweep(false);
         publish();
     }
     private void sweep(boolean force)throws Exception{
+        sweep(force,0);
+    }
+    private void sweep(boolean force,long retestId)throws Exception{
         if(nodes.isEmpty()){lastSweep=now();busy=false;stage="";noNodes();publish();return;}
-        inSweep=true;busy=true;if(current==null)phase="testing";
-        progress("connections","Testing connections: 0 of "+nodes.size());
-        try{
-            // Bounded batches keep a large account from opening hundreds of sockets at once.
-            for(int pass=0;pass<(force?ProductContract.policyInt("forcedSweepPasses"):1);pass++)for(int offset=0;offset<nodes.size();offset+=8){
-                ensureRunning();List<Node> batch=nodes.subList(offset,Math.min(offset+8,nodes.size()));
-                ArrayList<CompletableFuture<JSONObject>> pending=new ArrayList<>();
-                for(Node n:batch)pending.add(actionAsync("testDelay",new JSONObject().put("proxy-name",n.name).put("test-url","https://www.gstatic.com/generate_204").put("timeout",5000).toString()));
-                for(int i=0;i<batch.size();i++){
-                    Node checked=batch.get(i);LatencyMeasurement result=measureLatency(checked,pending.get(i));
-                    for(int retry=0;!result.ok&&retry<ProductContract.policyInt("latencyRetryCount");retry++)result=measureLatency(checked,null);
-                    recordMeasurement(checked,result);
-                    if(current!=null&&current.id.equals(batch.get(i).id))lastCurrentCheck=now();
-                    stage="connections";detail="Testing connections: "+(offset+i+1)+" of "+nodes.size()+" · pass "+(pass+1)+" of "+(force?ProductContract.policyInt("forcedSweepPasses"):1);
-                }
-                publish();
-            }
-            requestProviderRecovery();
-            ArrayList<SelectionPolicy.Health> ordered=new ArrayList<>(health.values());ordered.sort(Comparator.comparingInt((SelectionPolicy.Health h)->SelectionPolicy.tier(h.country,app.preferred())).thenComparingDouble(h->h.connectionScore(now())).thenComparing(h->h.name));
-            ArrayList<SelectionPolicy.Health> candidates=new ArrayList<>();
-            for(SelectionPolicy.Health h:ordered)if(h.connectionFresh(now())&&(force||!h.qualified(now())))candidates.add(h);
-            LinkedHashSet<SelectionPolicy.Health> budget=new LinkedHashSet<>();
-            if(current!=null&&candidates.contains(record(current)))budget.add(record(current));
-            for(String country:app.preferred())for(SelectionPolicy.Health h:candidates)if(country.equals(h.country)){budget.add(h);break;}
-            ArrayList<SelectionPolicy.Health> exploring=new ArrayList<>(candidates);exploring.removeAll(budget);
-            int limit=(int)settingLong("checkTopK");if(exploring.size()>Math.max(0,limit-budget.size()))budget.add(exploring.get(exploreCursor++%exploring.size()));
-            int count=Math.max(limit,budget.size());for(SelectionPolicy.Health h:candidates){if(budget.size()>=count)break;budget.add(h);}
-            for(SelectionPolicy.Health h:budget){ensureRunning();Node n=findById(h.id);if(n!=null)probeServices(n);publish();}
-            decide(force);lastSweep=now();
-            if(current==null || !currentUsable()){
-                phase="degraded";error="NO_HEALTHY_NODE";detail="No node passed all checks. VPN stays active and blocks unverified traffic.";
-                if(current!=null){action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name","REJECT").toString(),5000);action("closeAllConnections",null,5000);current=null;pinned="";invalidateMonitor();}
-            }else warnRetainedServicePath();
-        }finally{inSweep=false;finishChecks();publish();}
+        // A logical scan persists its pass/fallback cursor across soft-budget
+        // slices. Repeated retests coalesce; there is no second blocking sweep.
+        ArrayList<Node> ordered=new ArrayList<>(nodes);
+        ordered.sort(Comparator.comparingInt((Node n)->current!=null&&current.id.equals(n.id)?-1:SelectionPolicy.tier(n.country,app.preferred()))
+            .thenComparingDouble(n->record(n).connectionScore(now())).thenComparing(n->n.name));
+        discovery.request(ordered,profileGeneration,force);
+        if(force)lastAppliedRetestId=Math.max(lastAppliedRetestId,retestId);
     }
     private void decide(boolean force)throws Exception{
         if(paused())return;
@@ -363,7 +429,7 @@ public final class VpnEngine {
     }
     private LatencyMeasurement measureLatency(Node n,CompletableFuture<JSONObject> pending)throws Exception{
         HealthDiagnostics.Latency result;
-        try{result=HealthDiagnostics.latency(await(pending==null?actionAsync("testDelay",new JSONObject().put("proxy-name",n.name).put("test-url","https://www.gstatic.com/generate_204").put("timeout",5000).toString()):pending,7500));}
+        try{result=HealthDiagnostics.latency(await(pending==null?testDelayAsync(n):pending,7500));}
         catch(TimeoutException ignored){result=HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CHECK_TIMEOUT);}
         catch(ExecutionException ignored){result=HealthDiagnostics.failed(HealthDiagnostics.LatencyCode.CORE_RESPONSE_FAILED);}
         int max=(int)settingLong("maxLatencyMs");
@@ -378,6 +444,18 @@ public final class VpnEngine {
     private void probeLatency(Node n)throws Exception{recordMeasurement(n,measureLatency(n,null));}
     private void recordLatency(Node node,HealthDiagnostics.Latency result){record(node).configure((int)settingLong("maxLatencyMs"),required());record(node).latency(result.millis,now());latencyDiagnostics.put(node.id,result);
         if(current!=null&&current.id.equals(node.id)&&!record(node).qualified(now()))updateRoute=NO_UPDATE_ROUTE;}
+    /** Native URLTest has its own 5s deadline. Keep permits until its callback or
+     * 7.5s hard expiry, including cancellation/profile changes; never alias an old
+     * callback onto a new profile's health or exceed eight native URLTests. */
+    private CompletableFuture<JSONObject> testDelayAsync(Node node)throws JSONException{
+        if(!nativeDelayPermits.tryAcquire())return failedFuture(new TimeoutException("NATIVE_CHECK_BUSY"));
+        CompletableFuture<JSONObject> result=new CompletableFuture<>();AtomicBoolean settled=new AtomicBoolean();
+        ScheduledFuture<?> deadline=nativeDeadlines.schedule(()->{if(settled.compareAndSet(false,true)){nativeDelayPermits.release();result.completeExceptionally(new TimeoutException("NATIVE_CHECK_TIMEOUT"));}},7500,TimeUnit.MILLISECONDS);
+        try{actionAsync("testDelay",new JSONObject().put("proxy-name",node.name).put("test-url","https://www.gstatic.com/generate_204").put("timeout",5000).toString()).whenComplete((value,failure)->{
+            if(settled.compareAndSet(false,true)){deadline.cancel(false);nativeDelayPermits.release();if(failure==null)result.complete(value);else result.completeExceptionally(failure);}
+        });}catch(Throwable failure){if(settled.compareAndSet(false,true)){deadline.cancel(false);nativeDelayPermits.release();result.completeExceptionally(failure);}}
+        return result;
+    }
     private String connectedDetail(){return (watchdogCode==ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT?"One application path needs attention":"Node connection checks passed")+" · "+(paused()?"Paused":pinned.isEmpty()?"Auto":"Pinned");}
     private boolean currentUsable(){return current!=null&&(record(current).qualified(now())||record(current).retainSelectedTransport(now()));}
     private void warnRetainedServicePath(){if(current!=null&&!record(current).qualified(now())&&record(current).retainSelectedTransport(now())){watchdogCode=ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT;phase="connected";error="SERVICE_PATH_DEGRADED";detail="Internet route remains active; one application service is unavailable. Checking alternatives.";}}
@@ -401,12 +479,8 @@ public final class VpnEngine {
         if(observation.code==ConnectionWatchdog.Code.CONFIRMED_FAILED){
             record(current).applicationFailed(now());pinned="";watchdogCode=ConnectionWatchdog.Code.RECOVERING;
             phase="degraded";error="APPLICATION_PATH_FAILED";detail="Application connections failed repeatedly; checking replacements";app.log("health","APPLICATION_PATH_FAILED");publish();
-            if(!paused())decide(true);
-            if(current!=null&&record(current).appRejected){
-                action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name","REJECT").toString(),5000);action("closeAllConnections",null,5000);
-                current=null;pinned="";invalidateMonitor();watchdogCode=ConnectionWatchdog.Code.NO_VERIFIED_REPLACEMENT;
-                error="NO_HEALTHY_NODE";detail="No verified replacement. VPN is blocking unverified traffic.";
-            }
+            if(current!=null&&record(current).appRejected){rejectCurrent();watchdogCode=ConnectionWatchdog.Code.NO_VERIFIED_REPLACEMENT;}
+            if(!paused())queueSweep(false);
             scheduleRecovery();
         }else if(observation.code==ConnectionWatchdog.Code.CONFIRMED_PARTIAL_FAILED&&!paused()){
             // Compare another route before blaming this node: a service-wide outage must not churn every node.
@@ -576,6 +650,9 @@ public final class VpnEngine {
                 .put("checkPath","per-node mixed listener; excluded Autopilot UID"));
             snapshot.put("coreProfileAccepted",profileUsable).put("nodeHealth",HealthDiagnostics.providers(rows)).put("networkSignals",networkSignals.json())
                 .put("checkPath","per-node mixed listener; excluded Autopilot UID").put("resolverPolicy",CoreDnsConfig.POLICY_ID).put("tunStack",TUN_STACK);
+            DiscoveryCoordinator.State scan=discoveryState;
+            if(scan!=null)snapshot.put("discovery",new JSONObject().put("cycle",scan.cycle).put("elapsedMs",scan.elapsedMillis).put("cursor",scan.cursor).put("total",scan.total).put("passes",scan.passes)
+                .put("nativeActive",scan.nativeActive).put("fallbackActive",scan.fallbackActive).put("fallbackQueued",scan.fallbackQueued).put("proofs",scan.proofs).put("requestCount",scan.requestCount).put("coalescedCount",scan.coalescedCount).put("lastAppliedRetestId",lastAppliedRetestId).put("active",scan.active).put("force",scan.force).put("code",scan.code));
             JSONObject diagnostic=app.coreDiagnostic();if(diagnostic!=null)snapshot.put("coreDiagnostic",diagnostic);
             JSONObject historical=app.historicalCoreDiagnostic();if(historical!=null)snapshot.put("lastCoreFailure",historical);
             app.publish(snapshot);service.updateNotification(current==null?detail:current.name+(pinned.isEmpty()?" · Auto":" · Pinned"));
@@ -584,6 +661,7 @@ public final class VpnEngine {
     private void cleanup(){
         updateRoute=NO_UPDATE_ROUTE;
         running.set(false);invalidateMonitor();watchdog.close();watchdogReachability.close();candidateReachability.close();checks.close();
+        discovery.close();discoveryReachability.close();for(ReachabilityChecks lane:discoveryFallback)lane.close();discoveryServices.close();discoveryProofWorker.shutdownNow();for(ExecutorService lane:discoveryFallbackWorkers)lane.shutdownNow();nativeDeadlines.shutdownNow();
         if(nativeReady){try{Clash.INSTANCE.stopTun();}catch(Throwable ignored){}try{Clash.INSTANCE.invokeAction(new JSONObject().put("id","stop-log").put("method","stopLog").put("data",JSONObject.NULL).toString(),(InvokeInterface)value->{});}catch(Throwable ignored){}
             try{Clash.INSTANCE.setEventListener((InvokeInterface)null);}catch(Throwable ignored){}}
         service.releaseTunnel();profileUsable=false;

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "productVersion": "0.4.2",
-  "androidVersionCode": 12,
+  "productVersion": "0.4.3",
+  "androidVersionCode": 13,
   "services": [
     "claude",
     "chatgpt",
@@ -198,7 +198,8 @@
     "updateAttempts": 3,
     "updateManifestDeadlineMs": 30000,
     "updateParallelMinBytes": 4194304,
-    "updateRetryBaseMs": 200
+    "updateRetryBaseMs": 200,
+    "discoveryBudgetMs": 60000
   },
   "capabilities": [
     {

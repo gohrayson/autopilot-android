@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class AutopilotApp extends Application {
     public ProviderRepository providers;
@@ -26,6 +27,7 @@ public final class AutopilotApp extends Application {
     private volatile String appliedRouting;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
+    private final AtomicBoolean listenerNotificationQueued=new AtomicBoolean();
     private final ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor();
     @Override public void onCreate() {
         super.onCreate();
@@ -102,7 +104,12 @@ public final class AutopilotApp extends Application {
         currentCoreDiagnostic=safe;lastCoreDiagnostic=safe;prefs.edit().putString("coreDiagnostic",safe.toString()).apply();
         log("core-baseline",safe.optString("code"));changed();
     }
-    public void changed(){UpdateManager updater=updates;if(updater!=null)updater.connectionStateChanged();main.post(()->{for(Runnable listener:listeners)listener.run();});}
+    public void changed(){
+        UpdateManager updater=updates;if(updater!=null)updater.connectionStateChanged();
+        // State and updater route guards change immediately. Coalesce only the
+        // expensive main-thread views when eight native callbacks arrive together.
+        if(listenerNotificationQueued.compareAndSet(false,true))main.post(()->{listenerNotificationQueued.set(false);for(Runnable listener:listeners)listener.run();});
+    }
     public void listen(Runnable listener){listeners.addIfAbsent(listener);}
     public void unlisten(Runnable listener){listeners.remove(listener);}
     /** Callers pass fixed component/code identifiers, never exception text or configurations. */
@@ -133,6 +140,7 @@ public final class AutopilotApp extends Application {
         JSONArray health=s.optJSONArray("nodeHealth");if(health!=null)out.append("Node health: ").append(health).append("\n");
         JSONObject network=s.optJSONObject("networkSignals");if(network!=null)out.append("Native network observations (session only, not per-node): ").append(network).append("\n");
         JSONObject watchdog=s.optJSONObject("watchdog");if(watchdog!=null)out.append("Active HTTPS watchdog: ").append(watchdog).append("\n");
+        JSONObject discovery=s.optJSONObject("discovery");if(discovery!=null)out.append("Node discovery: ").append(discovery).append("\n");
         if(updates!=null)out.append(updates.diagnostic());
         JSONArray skipped=s.optJSONArray("skippedNodes");if(skipped!=null&&skipped.length()>0)out.append("Skipped diagnostics: ").append(skipped).append("\n");
         for(String p:List.of("onevpn","octohide","import")){

@@ -104,3 +104,4 @@ if [[ "$gradle_status" -ne 0 ]]; then exit "$gradle_status"; fi
 if [[ "$xml_status" -ne 0 ]]; then exit "$xml_status"; fi
 node "$project/tools/ci-update-route-check.cjs" "$project" 2>&1 | tee "$results/update-https-runner.log"
 node "$project/tools/ci-tunnel-check.cjs" "$project" 2>&1 | tee "$results/tunnel-runner.log"
+node "$project/tools/ci-discovery-check.cjs" "$project" 2>&1 | tee "$results/discovery-runner.log"
