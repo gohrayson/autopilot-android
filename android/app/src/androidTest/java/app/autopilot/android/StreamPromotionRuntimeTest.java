@@ -61,7 +61,9 @@ public final class StreamPromotionRuntimeTest {
             });
             int switches=events(app,"NODE_SWITCH"),upgrades=events(app,"HEALTHY_UPGRADE");long promotionStarted=System.nanoTime();
             engine.retest(); // Public production action: fresh native + HTTPS + service proof drives promotion.
-            await(20000,()->SECOND.equals(app.state().optString("current")),"Fresh replacement promoted by actual discovery");
+            JSONArray proofSnapshots=new JSONArray();long[] nextSnapshot={0};
+            try{await(20000,()->{JSONObject snapshot=app.state();long sampleAt=System.currentTimeMillis();if(sampleAt>=nextSnapshot[0]&&proofSnapshots.length()<12){proofSnapshots.put(new JSONObject().put("at",sampleAt).put("state",snapshot).put("fixture",fixture.stats()));nextSnapshot[0]=sampleAt+2000;}return SECOND.equals(snapshot.optString("current"));},"Fresh replacement promoted by actual discovery");}
+            finally{evidence.put("proofSnapshots",proofSnapshots).put("afterDiscovery",app.state());write(context,"stream-promotion-evidence.json",evidence);}
             long promotionMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-promotionStarted);
             assertEquals(SECOND,nativeSelection());assertEquals(1,tunStarts(app));
             assertEquals("Proof expiry must not become a destructive switch",switches,events(app,"NODE_SWITCH"));
@@ -119,7 +121,7 @@ public final class StreamPromotionRuntimeTest {
         static final Set<String> HOSTS=Set.of("www.gstatic.com","api.openai.com","api.anthropic.com");
         final String marker="AUTOPILOT_STREAM_"+UUID.randomUUID();
         final ServerSocket listener=new ServerSocket(0,64,InetAddress.getByName("127.0.0.1"));
-        final Set<Socket> sockets=ConcurrentHashMap.newKeySet();final Set<String> tlsHosts=ConcurrentHashMap.newKeySet();
+        final Set<Socket> sockets=ConcurrentHashMap.newKeySet();final Set<String> tlsHosts=ConcurrentHashMap.newKeySet(),tlsByNode=ConcurrentHashMap.newKeySet(),deniedTargets=ConcurrentHashMap.newKeySet();
         final AtomicBoolean firstEnabled=new AtomicBoolean(true),secondEnabled=new AtomicBoolean(),promoted=new AtomicBoolean(),streamClosed=new AtomicBoolean(),closed=new AtomicBoolean();
         final AtomicInteger acknowledged=new AtomicInteger(),afterPromotionAcks=new AtomicInteger(),freshSecondConnections=new AtomicInteger(),denied=new AtomicInteger();
         final AtomicLong tlsSent=new AtomicLong(),tlsReceived=new AtomicLong();final AtomicReference<String> failure=new AtomicReference<>();
@@ -137,8 +139,8 @@ public final class StreamPromotionRuntimeTest {
                 int type=input.readUnsignedByte();String host;if(type==1){byte[] ip=new byte[4];input.readFully(ip);host=InetAddress.getByAddress(ip).getHostAddress();}else if(type==3){byte[] name=new byte[input.readUnsignedByte()];input.readFully(name);host=new String(name,StandardCharsets.US_ASCII).toLowerCase(Locale.ROOT);}else throw new IOException("ADDRESS_DENIED");int port=input.readUnsignedShort();
                 if(port==80&&"203.0.113.7".equals(host)){accepted(output);stream(client,input,output,username);return;}
                 if(port==80&&"203.0.113.8".equals(host)){accepted(output);String request=line(input);if(!("FRESH "+marker).equals(request))throw new IOException("FRESH_MARKER");output.write(("NEW "+username+" "+marker+"\n").getBytes(StandardCharsets.US_ASCII));output.flush();if("second".equals(username))freshSecondConnections.incrementAndGet();return;}
-                if(port!=443||!HOSTS.contains(host)){denied.incrementAndGet();throw new IOException("DESTINATION_DENIED");}
-                remote=new Socket();sockets.add(remote);remote.connect(new InetSocketAddress(host,443),5000);remote.setSoTimeout(10000);accepted(output);tlsHosts.add(host);
+                if(port!=443||!HOSTS.contains(host)){denied.incrementAndGet();if(deniedTargets.size()<32)deniedTargets.add(username+" "+host+":"+port);throw new IOException("DESTINATION_DENIED");}
+                remote=new Socket();sockets.add(remote);remote.connect(new InetSocketAddress(host,443),5000);remote.setSoTimeout(10000);accepted(output);tlsHosts.add(host);tlsByNode.add(username+" "+host);
                 byte[] prefix=new byte[3];input.readFully(prefix);if(prefix[0]!=22||prefix[1]!=3||(prefix[2]&255)>4){denied.incrementAndGet();throw new IOException("TLS_REQUIRED");}
                 remote.getOutputStream().write(prefix);remote.getOutputStream().flush();tlsSent.addAndGet(3);Socket upstream=remote;
                 Future<?> response=pumps.submit(()->copy(upstream,client,tlsReceived));copy(client,upstream,tlsSent);response.cancel(true);
@@ -158,7 +160,7 @@ public final class StreamPromotionRuntimeTest {
         private static void copy(Socket source,Socket target,AtomicLong count){try{byte[] buffer=new byte[16384];int n;InputStream input=source.getInputStream();OutputStream output=target.getOutputStream();while((n=input.read(buffer))!=-1){output.write(buffer,0,n);output.flush();count.addAndGet(n);}}catch(IOException ignored){}finally{try{target.shutdownOutput();}catch(IOException ignored){}}}
         private void closeSocket(Socket socket){sockets.remove(socket);try{socket.close();}catch(IOException ignored){}}
         private static ExecutorService pool(int threads,int queued,String name){return new ThreadPoolExecutor(threads,threads,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(queued),job->{Thread thread=new Thread(job,name);thread.setDaemon(true);return thread;},new ThreadPoolExecutor.AbortPolicy());}
-        JSONObject stats()throws Exception{return new JSONObject().put("acknowledged",acknowledged.get()).put("afterPromotionAcks",afterPromotionAcks.get()).put("freshSecondConnections",freshSecondConnections.get()).put("streamClosed",streamClosed.get()).put("tlsHosts",new JSONArray(new TreeSet<>(tlsHosts))).put("tlsSent",tlsSent.get()).put("tlsReceived",tlsReceived.get()).put("denied",denied.get()).put("failure",failure.get()==null?"":failure.get()).put("openSockets",sockets.size()).put("closed",closed.get());}
+        JSONObject stats()throws Exception{return new JSONObject().put("acknowledged",acknowledged.get()).put("afterPromotionAcks",afterPromotionAcks.get()).put("freshSecondConnections",freshSecondConnections.get()).put("streamClosed",streamClosed.get()).put("tlsHosts",new JSONArray(new TreeSet<>(tlsHosts))).put("tlsByNode",new JSONArray(new TreeSet<>(tlsByNode))).put("tlsSent",tlsSent.get()).put("tlsReceived",tlsReceived.get()).put("denied",denied.get()).put("deniedTargets",new JSONArray(new TreeSet<>(deniedTargets))).put("failure",failure.get()==null?"":failure.get()).put("openSockets",sockets.size()).put("closed",closed.get());}
         @Override public void close()throws Exception{closed.set(true);listener.close();accept.join(5000);for(Socket socket:sockets)closeSocket(socket);workers.shutdownNow();pumps.shutdownNow();assertTrue(workers.awaitTermination(6,TimeUnit.SECONDS));assertTrue(pumps.awaitTermination(6,TimeUnit.SECONDS));assertFalse(accept.isAlive());assertTrue(sockets.isEmpty());}
     }
 }
