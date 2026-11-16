@@ -44,6 +44,7 @@ adb -s "$serial" shell pm grant app.autopilot.android.debug android.permission.P
 set +e
 gradle -p "$project" --no-daemon --console=plain \
   :app:connectedDebugAndroidTest \
+  -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true \
   -Pandroid.testInstrumentationRunnerArguments.class=app.autopilot.android.NativeCoreConfigTest,app.autopilot.android.UpdateDownloadRuntimeTest,app.autopilot.android.VpnStatusUiTest,app.autopilot.android.UpdateStatusUiTest,app.autopilot.android.UpdateCacheRuntimeTest,app.autopilot.android.ReachabilityRuntimeTest,app.autopilot.android.ProductParityUiTest,app.autopilot.android.NetworkTelemetryRuntimeTest \
   2>&1 | tee "$results/native-core-gradle.log"
 gradle_status=${PIPESTATUS[0]}
