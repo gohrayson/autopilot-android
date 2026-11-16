@@ -65,6 +65,14 @@ async function probeStage(ready) {
     + " | base64 -d > files/discovery-complete.tmp && mv files/discovery-complete.tmp files/discovery-complete'");
   return uid;
 }
+function validateOptionalExit(fixture) {
+  const sessions=fixture.exitMeasurementSessions,hosts=fixture.exitMeasurementHosts;
+  if(!Number.isSafeInteger(sessions)||sessions<0||!Array.isArray(hosts)
+    ||JSON.stringify(hosts)!==JSON.stringify(sessions>0?['www.cloudflare.com']:[])
+    ||!['exitMeasurementSent','exitMeasurementReceived'].every(key=>Number.isSafeInteger(fixture[key])&&fixture[key]>=0)
+    ||!Array.isArray(fixture.deniedTargets)||fixture.deniedTargets.length>32
+    ||fixture.deniedTargets.some(value=>typeof value!=='string'||value.length>260||/[^A-Za-z0-9.?:-]/.test(value)))throw Error('Invalid optional exit-identity fixture evidence');
+}
 async function main() {
   if (process.platform !== 'linux' || process.env.GITHUB_ACTIONS !== 'true') throw new Error('Require a disposable GitHub Linux runner.');
   await fs.mkdir(output, { recursive: true });
@@ -107,6 +115,7 @@ async function main() {
     || !log.includes('AUTOPILOT_DISCOVERY_RUNTIME_ACCEPTED')) throw new Error('Production discovery instrumentation did not pass: ' + log.slice(-8000));
   const evidence = JSON.parse(await readPrivate('discovery-evidence.json'));
   const fixture = JSON.parse(await readPrivate('discovery-fixture.json'));
+  validateOptionalExit(fixture);
   for (const field of ['selectedBeforeTail', 'watchdogAdvancedDuringDiscovery', 'retestCoalesced', 'manualRetestAcknowledged', 'nativeSelectorPreserved',
     'separateUidConnected', 'separateUidRetest', 'platformTls', 'threeWatchdogOrigins', 'stopCleanup', 'fixtureClosed']) {
     if (evidence[field] !== true) throw new Error('Missing final production discovery evidence: ' + field);
@@ -118,7 +127,7 @@ async function main() {
     || JSON.stringify(hosts) !== JSON.stringify(['api.anthropic.com', 'api.openai.com', 'www.gstatic.com'])) throw new Error('Invalid discovery fixture/cleanup evidence.');
   const receipt = 'ANDROID_DISCOVERY_RUNTIME_RECEIPT tests=1 expected=1 failures=0 errors=0 skipped=0 pool=52 required=chatgpt'
     + ' selectedBeforeTail=true watchdogAdvancedDuringDiscovery=true retestCoalesced=true manualRetestAcknowledged=true nativeSelector=true tunStarts=1'
-    + ' separateUidConnected=true separateUidRetest=true platformTls=true threeWatchdogOrigins=true stopCleanup=true fixtureCleanup=true\n';
+    + ' separateUidConnected=true separateUidRetest=true platformTls=true threeWatchdogOrigins=true optionalExitMeasurement=true exitMeasurementSessions='+fixture.exitMeasurementSessions+' stopCleanup=true fixtureCleanup=true\n';
   process.stdout.write(receipt);await fs.writeFile(path.join(output, 'discovery-receipt.txt'), receipt);
 }
 main().catch(async error => {

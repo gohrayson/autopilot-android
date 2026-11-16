@@ -13,6 +13,10 @@ async function read(name){if(!/^[a-z0-9.-]+$/.test(name))throw Error('Invalid fi
 async function save(){if(!serial)return;for(const name of['stream-promotion-evidence.json','stream-promotion-fixture.json','diagnostics.log']){const text=await read(name);if(text)await fs.writeFile(path.join(output,name==='diagnostics.log'?'stream-promotion-diagnostics.log':name),text);}await fs.writeFile(path.join(output,'stream-promotion-instrumentation.log'),log);await fs.writeFile(path.join(output,'stream-promotion-other-uid.log'),probeLog);}
 function launch(args,append,onExit){const child=cp.spawn('adb',['-s',serial,'shell','am','instrument','-w',...args]);child.stdout.on('data',b=>{append(String(b));process.stdout.write(b);});child.stderr.on('data',b=>{append(String(b));process.stderr.write(b);});const done=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',code=>{onExit();resolve(code);});});done.catch(()=>{});return{child,done};}
 async function bounded(promise,until,purpose){let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(purpose+' exceeded hosted deadline')),Math.max(1,until-Date.now()));})]);}finally{clearTimeout(timer);}}
+function validateOptionalExit(fixture){const sessions=fixture.exitMeasurementSessions,hosts=fixture.exitMeasurementHosts;
+  if(!Number.isSafeInteger(sessions)||sessions<0||!Array.isArray(hosts)||JSON.stringify(hosts)!==JSON.stringify(sessions>0?['www.cloudflare.com']:[])
+    ||!['exitMeasurementSent','exitMeasurementReceived'].every(key=>Number.isSafeInteger(fixture[key])&&fixture[key]>=0)
+    ||!Array.isArray(fixture.deniedTargets)||fixture.deniedTargets.length>32||fixture.deniedTargets.some(value=>typeof value!=='string'||value.length>260||/[^A-Za-z0-9.?:-]/.test(value)))throw Error('Invalid optional exit-identity fixture evidence');}
 async function mainRun(){
   if(process.platform!=='linux'||process.env.GITHUB_ACTIONS!=='true')throw Error('Require disposable hosted GitHub Linux runner');
   const testSource=await fs.readFile(path.join(project,'app/src/androidTest/java/app/autopilot/android/StreamPromotionRuntimeTest.java'),'utf8');
@@ -41,12 +45,13 @@ async function mainRun(){
   const status=await bounded(started.done,until,'Production stream instrumentation');await save();
   if(status!==0||!/^OK \(1 test\)\s*$/m.test(log)||/FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed|There (?:was|were) \d+ failures?/.test(log)||!log.includes('AUTOPILOT_STREAM_PROMOTION_RUNTIME_ACCEPTED'))throw Error('Production stream instrumentation failed: '+log.slice(-12000));
   const evidence=JSON.parse(await read('stream-promotion-evidence.json')),fixture=JSON.parse(await read('stream-promotion-fixture.json'));
+  validateOptionalExit(fixture);
   const required=['oldProofExpiredBeforeDiscovery','automaticDiscoveryPromotion','oldSocketContinuous','newSocketUsesSecondOutbound','confirmedWatchdogFailure','confirmedRecoveryClosedStream','nativeReject','separateUid','platformTls','threeWatchdogOrigins','stopCleanup','fixtureClosed'];
   for(const name of required)if(evidence[name]!==true)throw Error('Missing final production stream evidence: '+name);
   if(evidence.tunStarts!==1||evidence.openFixtureSockets!==0||evidence.oldSocketMessagesAfterPromotion<3||!Number.isInteger(evidence.promotionMs)||evidence.promotionMs>20000
     ||fixture.afterPromotionAcks<3||fixture.freshSecondConnections<1||fixture.streamClosed!==true||fixture.denied!==0||fixture.failure!==''||fixture.openSockets!==0||fixture.closed!==true
     ||fixture.tlsSent<=0||fixture.tlsReceived<=0||JSON.stringify([...fixture.tlsHosts].sort())!==JSON.stringify(['api.anthropic.com','api.openai.com','www.gstatic.com']))throw Error('Production stream fixture/counter evidence invalid');
-  const receipt='ANDROID_STREAM_PROMOTION_RUNTIME_RECEIPT tests=1 expected=1 failures=0 errors=0 skipped=0 automaticDiscovery=true staleOldProof=true sameOldSocket=true newSocketNewOutbound=true confirmedRecoveryCloses=true separateUid=true tunStarts=1 platformTls=true stopCleanup=true fixtureCleanup=true\n';
+  const receipt='ANDROID_STREAM_PROMOTION_RUNTIME_RECEIPT tests=1 expected=1 failures=0 errors=0 skipped=0 automaticDiscovery=true staleOldProof=true sameOldSocket=true newSocketNewOutbound=true confirmedRecoveryCloses=true separateUid=true tunStarts=1 platformTls=true optionalExitMeasurement=true exitMeasurementSessions='+fixture.exitMeasurementSessions+' stopCleanup=true fixtureCleanup=true\n';
   process.stdout.write(receipt);await fs.writeFile(path.join(output,'stream-promotion-receipt.txt'),receipt);
 }
 mainRun().catch(async error=>{console.error(error.stack||error.message);process.exitCode=1;const cleanupUntil=Date.now()+20000;while(main&&!mainExited&&Date.now()<cleanupUntil)await sleep(100);try{await save();}catch{}}).finally(async()=>{if(serial){try{await adb('shell','am','force-stop',app);await adb('shell','am','force-stop','app.autopilot.probe');}catch{}}if(main&&!mainExited)main.kill();if(probe&&!probeExited)probe.kill();});

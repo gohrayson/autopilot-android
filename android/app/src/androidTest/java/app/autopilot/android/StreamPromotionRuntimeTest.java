@@ -124,9 +124,11 @@ public final class StreamPromotionRuntimeTest {
 
     private static final class Fixture implements AutoCloseable {
         static final Set<String> HOSTS=Set.of("www.gstatic.com","api.openai.com","api.anthropic.com");
+        static final String EXIT_HOST="www.cloudflare.com";
         final String marker="AUTOPILOT_STREAM_"+UUID.randomUUID();
         final ServerSocket listener=new ServerSocket(0,64,InetAddress.getByName("127.0.0.1"));
         final Set<Socket> sockets=ConcurrentHashMap.newKeySet();final Map<Socket,String> controlChecks=new ConcurrentHashMap<>();final Set<String> tlsHosts=ConcurrentHashMap.newKeySet(),tlsByNode=ConcurrentHashMap.newKeySet(),deniedTargets=ConcurrentHashMap.newKeySet();
+        final Set<String> exitHosts=ConcurrentHashMap.newKeySet();final AtomicInteger exitSessions=new AtomicInteger();final AtomicLong exitSent=new AtomicLong(),exitReceived=new AtomicLong();
         final AtomicBoolean firstEnabled=new AtomicBoolean(true),secondEnabled=new AtomicBoolean(),promoted=new AtomicBoolean(),streamClosed=new AtomicBoolean(),closed=new AtomicBoolean();
         final AtomicInteger acknowledged=new AtomicInteger(),afterPromotionAcks=new AtomicInteger(),freshSecondConnections=new AtomicInteger(),denied=new AtomicInteger(),privateDnsValidationRefused=new AtomicInteger();
         final AtomicLong tlsSent=new AtomicLong(),tlsReceived=new AtomicLong();final AtomicReference<String> failure=new AtomicReference<>();
@@ -147,15 +149,17 @@ public final class StreamPromotionRuntimeTest {
                 // Android validates Private DNS on the exact production TUN DNS
                 // address. The fixture never forwards that internal port externally.
                 if(port==853&&"172.19.0.2".equals(host)){privateDnsValidationRefused.incrementAndGet();output.write(new byte[]{5,2,0,1,0,0,0,0,0,0});output.flush();return;}
-                if(port!=443||!HOSTS.contains(host)){denied.incrementAndGet();if(deniedTargets.size()<32)deniedTargets.add(username+" "+host+":"+port);throw new IOException("DESTINATION_DENIED");}
+                boolean exit=EXIT_HOST.equals(host);
+                if(port!=443||!HOSTS.contains(host)&&!exit){deny(host,port);throw new IOException("DESTINATION_DENIED");}
                 controlChecks.put(client,username);
                 if(!enabled(username))return; // Close an auth-before-transition race as well.
-                remote=new Socket();sockets.add(remote);remote.connect(new InetSocketAddress(host,443),5000);remote.setSoTimeout(10000);accepted(output);tlsHosts.add(host);tlsByNode.add(username+" "+host);
+                remote=new Socket();sockets.add(remote);remote.connect(new InetSocketAddress(host,443),5000);remote.setSoTimeout(10000);accepted(output);if(exit){exitHosts.add(host);exitSessions.incrementAndGet();}else{tlsHosts.add(host);tlsByNode.add(username+" "+host);}
+                AtomicLong requestCount=exit?exitSent:tlsSent,responseCount=exit?exitReceived:tlsReceived;
                 controlChecks.put(remote,username);
                 if(!enabled(username))return;
-                byte[] prefix=new byte[3];input.readFully(prefix);if(prefix[0]!=22||prefix[1]!=3||(prefix[2]&255)>4){denied.incrementAndGet();throw new IOException("TLS_REQUIRED");}
-                remote.getOutputStream().write(prefix);remote.getOutputStream().flush();tlsSent.addAndGet(3);Socket upstream=remote;
-                Future<?> response=pumps.submit(()->copy(upstream,client,tlsReceived));copy(client,upstream,tlsSent);response.cancel(true);
+                byte[] prefix=new byte[3];input.readFully(prefix);if(prefix[0]!=22||prefix[1]!=3||(prefix[2]&255)>4){deny("NON_TLS",port);throw new IOException("TLS_REQUIRED");}
+                remote.getOutputStream().write(prefix);remote.getOutputStream().flush();requestCount.addAndGet(3);Socket upstream=remote;
+                Future<?> response=pumps.submit(()->copy(upstream,client,responseCount));copy(client,upstream,requestCount);response.cancel(true);
             }catch(IOException expected){if(!closed.get()&&!(expected instanceof EOFException)&&!(expected instanceof SocketException)&&!(expected instanceof SocketTimeoutException))failure.compareAndSet(null,"PROTOCOL_OR_PUBLIC_CONNECT_FAILED");}
             finally{closeSocket(client);if(remote!=null)closeSocket(remote);}
         }
@@ -168,13 +172,14 @@ public final class StreamPromotionRuntimeTest {
             }}finally{streamClosed.set(true);}
         }
         private static String line(InputStream input)throws IOException{ByteArrayOutputStream bytes=new ByteArrayOutputStream();while(bytes.size()<512){int value=input.read();if(value<0)throw new EOFException();if(value=='\n')return bytes.toString(StandardCharsets.US_ASCII.name());bytes.write(value);}throw new IOException("LINE_LIMIT");}
+        private void deny(String host,int port){denied.incrementAndGet();synchronized(deniedTargets){if(deniedTargets.size()<32)deniedTargets.add(host.substring(0,Math.min(host.length(),253)).replaceAll("[^A-Za-z0-9.:-]","?")+":"+port);}}
         private static void accepted(OutputStream out)throws IOException{out.write(new byte[]{5,0,0,1,127,0,0,1,0,0});out.flush();}
         private static void copy(Socket source,Socket target,AtomicLong count){try{byte[] buffer=new byte[16384];int n;InputStream input=source.getInputStream();OutputStream output=target.getOutputStream();while((n=input.read(buffer))!=-1){output.write(buffer,0,n);output.flush();count.addAndGet(n);}}catch(IOException ignored){}finally{try{target.shutdownOutput();}catch(IOException ignored){}}}
         void closeControlChecks(String user){for(Map.Entry<Socket,String> entry:controlChecks.entrySet())if(user.equals(entry.getValue()))closeSocket(entry.getKey());}
         private boolean enabled(String user){return "first".equals(user)?firstEnabled.get():secondEnabled.get();}
         private void closeSocket(Socket socket){controlChecks.remove(socket);sockets.remove(socket);try{socket.close();}catch(IOException ignored){}}
         private static ExecutorService pool(int threads,int queued,String name){return new ThreadPoolExecutor(threads,threads,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(queued),job->{Thread thread=new Thread(job,name);thread.setDaemon(true);return thread;},new ThreadPoolExecutor.AbortPolicy());}
-        JSONObject stats()throws Exception{return new JSONObject().put("acknowledged",acknowledged.get()).put("afterPromotionAcks",afterPromotionAcks.get()).put("freshSecondConnections",freshSecondConnections.get()).put("streamClosed",streamClosed.get()).put("tlsHosts",new JSONArray(new TreeSet<>(tlsHosts))).put("tlsByNode",new JSONArray(new TreeSet<>(tlsByNode))).put("tlsSent",tlsSent.get()).put("tlsReceived",tlsReceived.get()).put("privateDnsValidationRefused",privateDnsValidationRefused.get()).put("denied",denied.get()).put("deniedTargets",new JSONArray(new TreeSet<>(deniedTargets))).put("failure",failure.get()==null?"":failure.get()).put("openSockets",sockets.size()).put("closed",closed.get());}
+        JSONObject stats()throws Exception{return new JSONObject().put("acknowledged",acknowledged.get()).put("afterPromotionAcks",afterPromotionAcks.get()).put("freshSecondConnections",freshSecondConnections.get()).put("streamClosed",streamClosed.get()).put("tlsHosts",new JSONArray(new TreeSet<>(tlsHosts))).put("tlsByNode",new JSONArray(new TreeSet<>(tlsByNode))).put("tlsSent",tlsSent.get()).put("tlsReceived",tlsReceived.get()).put("exitMeasurementSessions",exitSessions.get()).put("exitMeasurementHosts",new JSONArray(new TreeSet<>(exitHosts))).put("exitMeasurementSent",exitSent.get()).put("exitMeasurementReceived",exitReceived.get()).put("privateDnsValidationRefused",privateDnsValidationRefused.get()).put("denied",denied.get()).put("deniedTargets",new JSONArray(new TreeSet<>(deniedTargets))).put("failure",failure.get()==null?"":failure.get()).put("openSockets",sockets.size()).put("closed",closed.get());}
         @Override public void close()throws Exception{closed.set(true);listener.close();accept.join(5000);for(Socket socket:sockets)closeSocket(socket);workers.shutdownNow();pumps.shutdownNow();assertTrue(workers.awaitTermination(6,TimeUnit.SECONDS));assertTrue(pumps.awaitTermination(6,TimeUnit.SECONDS));assertFalse(accept.isAlive());assertTrue(sockets.isEmpty());}
     }
 }

@@ -235,12 +235,15 @@ public final class DiscoveryRuntimeTest {
     /** SOCKS protocol only: TLS bytes are opaque and verified by the real Android HTTPS clients. */
     private static final class SocksFixture implements AutoCloseable {
         static final Set<String> TLS_HOSTS=Set.of("www.gstatic.com","api.openai.com","api.anthropic.com");
+        static final String EXIT_HOST="www.cloudflare.com";
         final String marker="AUTOPILOT_DISCOVERY_"+UUID.randomUUID();
         final ServerSocket listener=new ServerSocket(0,128,InetAddress.getByName("127.0.0.1"));
         final Set<Socket> sockets=ConcurrentHashMap.newKeySet();
         final Set<String> hosts=ConcurrentHashMap.newKeySet();
+        final Set<String> exitHosts=ConcurrentHashMap.newKeySet(),deniedTargets=ConcurrentHashMap.newKeySet();
         final AtomicInteger badSessions=new AtomicInteger(),healthySessions=new AtomicInteger(),markerHits=new AtomicInteger(),denied=new AtomicInteger(),peakSockets=new AtomicInteger();
         final AtomicLong sent=new AtomicLong(),received=new AtomicLong();
+        final AtomicInteger exitSessions=new AtomicInteger();final AtomicLong exitSent=new AtomicLong(),exitReceived=new AtomicLong();
         final AtomicReference<String> failure=new AtomicReference<>();
         final AtomicBoolean closed=new AtomicBoolean();
         final ThreadPoolExecutor workers=pool(16,128,"discovery-socks");
@@ -287,24 +290,27 @@ public final class DiscoveryRuntimeTest {
                 int port=input.readUnsignedShort();
                 if("203.0.113.7".equals(host)&&port==80){
                     accepted(output);String header=header(input);
-                    if(!header.startsWith("GET /autopilot-probe HTTP/1.")){denied.incrementAndGet();throw new IOException("MARKER_PATH_DENIED");}
+                    if(!header.startsWith("GET /autopilot-probe HTTP/1.")){deny("FIXTURE_MARKER_PATH",port);throw new IOException("MARKER_PATH_DENIED");}
                     byte[] body=marker.getBytes(StandardCharsets.US_ASCII);
                     output.write(("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
                     output.write(body);output.flush();markerHits.incrementAndGet();return;
                 }
-                if(port!=443||!TLS_HOSTS.contains(host)){
-                    denied.incrementAndGet();output.write(new byte[]{5,2,0,1,0,0,0,0,0,0});output.flush();return;
+                // Exit identity is optional and separate from the three watchdog origins.
+                boolean exit=EXIT_HOST.equals(host);
+                if(port!=443||!TLS_HOSTS.contains(host)&&!exit){
+                    deny(host,port);output.write(new byte[]{5,2,0,1,0,0,0,0,0,0});output.flush();return;
                 }
                 upstream=new Socket();track(upstream);upstream.connect(new InetSocketAddress(host,443),5000);upstream.setSoTimeout(10000);
-                accepted(output);hosts.add(host);Socket remote=upstream;
+                accepted(output);if(exit){exitHosts.add(host);exitSessions.incrementAndGet();}else hosts.add(host);Socket remote=upstream;
+                AtomicLong requestCount=exit?exitSent:sent,responseCount=exit?exitReceived:received;
                 // Refuse plaintext tunneling even to the fixed port-443 allowlist.
                 // Inspect only the TLS record prefix; never terminate TLS, inspect a
                 // request path/body, or replace the platform certificate verifier.
                 byte[] prefix=new byte[3];input.readFully(prefix);
-                if(prefix[0]!=22||prefix[1]!=3||(prefix[2]&255)>4){denied.incrementAndGet();throw new IOException("TLS_RECORD_REQUIRED");}
-                remote.getOutputStream().write(prefix);remote.getOutputStream().flush();sent.addAndGet(prefix.length);
-                Future<?> response=pumps.submit(()->copy(remote,client,received));
-                copy(client,remote,sent);response.cancel(true);
+                if(prefix[0]!=22||prefix[1]!=3||(prefix[2]&255)>4){deny("NON_TLS",port);throw new IOException("TLS_RECORD_REQUIRED");}
+                remote.getOutputStream().write(prefix);remote.getOutputStream().flush();requestCount.addAndGet(prefix.length);
+                Future<?> response=pumps.submit(()->copy(remote,client,responseCount));
+                copy(client,remote,requestCount);response.cancel(true);
             }catch(RejectedExecutionException full){if(!closed.get())failure.compareAndSet(null,"FIXTURE_PUMPS_EXHAUSTED");}
             catch(IOException error){
                 // Production cancellation and bad-session timeouts are expected. Public
@@ -312,6 +318,7 @@ public final class DiscoveryRuntimeTest {
                 if(!closed.get()&&!stalled&&!(error instanceof EOFException)&&!(error instanceof SocketException)&&!(error instanceof SocketTimeoutException))failure.compareAndSet(null,"FIXTURE_PROTOCOL_OR_PUBLIC_CONNECT_FAILED");
             }finally{if(!stalled)closeSocket(client);if(upstream!=null)closeSocket(upstream);}
         }
+        private void deny(String host,int port){denied.incrementAndGet();synchronized(deniedTargets){if(deniedTargets.size()<32)deniedTargets.add(host.substring(0,Math.min(host.length(),253)).replaceAll("[^A-Za-z0-9.:-]","?")+":"+port);}}
         private static void accepted(OutputStream output)throws IOException {output.write(new byte[]{5,0,0,1,127,0,0,1,0,0});output.flush();}
         private void copy(Socket source,Socket target,AtomicLong count){
             try{byte[] bytes=new byte[16384];InputStream input=source.getInputStream();OutputStream output=target.getOutputStream();int length;
@@ -327,7 +334,8 @@ public final class DiscoveryRuntimeTest {
         }
         JSONObject stats()throws Exception {return new JSONObject().put("badSessions",badSessions.get()).put("healthySessions",healthySessions.get())
             .put("markerHits",markerHits.get()).put("tlsSent",sent.get()).put("tlsReceived",received.get()).put("tlsHosts",new JSONArray(new TreeSet<>(hosts)))
-            .put("unexpectedDestinations",denied.get()).put("peakSockets",peakSockets.get()).put("openSockets",sockets.size())
+            .put("exitMeasurementSessions",exitSessions.get()).put("exitMeasurementHosts",new JSONArray(new TreeSet<>(exitHosts))).put("exitMeasurementSent",exitSent.get()).put("exitMeasurementReceived",exitReceived.get())
+            .put("unexpectedDestinations",denied.get()).put("deniedTargets",new JSONArray(new TreeSet<>(deniedTargets))).put("peakSockets",peakSockets.get()).put("openSockets",sockets.size())
             .put("failureCode",failure.get()==null?"":failure.get()).put("closed",closed.get());}
         private void closeSocket(Socket socket){sockets.remove(socket);try{socket.close();}catch(IOException ignored){}}
         private static ThreadFactory daemon(String name){return action->{Thread thread=new Thread(action,name);thread.setDaemon(true);return thread;};}
