@@ -4,6 +4,9 @@ import android.app.Instrumentation;
 import android.content.*;
 import android.graphics.Bitmap;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.PixelCopy;
 import android.widget.*;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -18,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 import static org.junit.Assert.*;
 
 /** Disposable emulator only: credential-free loopback transfer and actual native/UI data paths. */
@@ -91,9 +95,19 @@ public final class NetworkTelemetryRuntimeTest {
             instrumentation.runOnMainSync(()->app.publishNetworkTelemetry(model.json()));instrumentation.waitForIdleSync();
             assertTrue(text(shown,"trafficRates").contains("KiB"));assertTrue(text(shown,"trafficSession").contains("KiB"));
             TextView identity=(TextView)field(shown,"networkExit");assertEquals(0xff51e1e8,identity.getCurrentTextColor());
-            File image=new File(app.getFilesDir(),"network-telemetry-ui.png");Bitmap screenshot=instrumentation.getUiAutomation().takeScreenshot();assertNotNull(screenshot);
-            try(FileOutputStream output=new FileOutputStream(image)){assertTrue(screenshot.compress(Bitmap.CompressFormat.PNG,100,output));}finally{screenshot.recycle();}
-            System.out.println("ANDROID_TELEMETRY_UI_ACCEPTED actualNativeActivity=true strictIdentity=true unknownFirstRate=true darkPalette=true screenshot="+image.getName());
+            // Keep the complete device image as evidence of any foreign/system
+            // overlay. PixelCopy separately reads the actual rendered app Window;
+            // it does not redraw views or suppress another process's errors.
+            File deviceImage=new File(app.getFilesDir(),"network-telemetry-device.png");Bitmap device=instrumentation.getUiAutomation().takeScreenshot();assertNotNull(device);
+            try(FileOutputStream output=new FileOutputStream(deviceImage)){assertTrue(device.compress(Bitmap.CompressFormat.PNG,100,output));}finally{device.recycle();}
+            AtomicReference<Bitmap> captured=new AtomicReference<>();AtomicInteger copyResult=new AtomicInteger(-1);CountDownLatch copied=new CountDownLatch(1);
+            instrumentation.runOnMainSync(()->{android.view.View decor=shown.getWindow().getDecorView();assertTrue(decor.getWidth()>0&&decor.getHeight()>0);
+                Bitmap window=Bitmap.createBitmap(decor.getWidth(),decor.getHeight(),Bitmap.Config.ARGB_8888);captured.set(window);
+                PixelCopy.request(shown.getWindow(),window,result->{copyResult.set(result);copied.countDown();},new Handler(Looper.getMainLooper()));});
+            File image=new File(app.getFilesDir(),"network-telemetry-ui.png");
+            try{assertTrue("Actual app Window copy deadline",copied.await(5,TimeUnit.SECONDS));assertEquals("Actual app Window PixelCopy",PixelCopy.SUCCESS,copyResult.get());try(FileOutputStream output=new FileOutputStream(image)){assertTrue(captured.get().compress(Bitmap.CompressFormat.PNG,100,output));}}
+            finally{Bitmap window=captured.get();if(window!=null&&copied.getCount()==0)window.recycle();}
+            System.out.println("ANDROID_TELEMETRY_UI_ACCEPTED actualNativeActivity=true strictIdentity=true unknownFirstRate=true darkPalette=true windowCapture=PixelCopy screenshot="+image.getName()+" deviceScreenshot="+deviceImage.getName());
         }finally{if(activity!=null){MainActivity close=activity;instrumentation.runOnMainSync(close::finish);}instrumentation.runOnMainSync(()->{app.publish(original);app.publishNetworkTelemetry(new NetworkTelemetryState(null,true).json());});}
     }
     private static JSONObject action(String method)throws Exception{CompletableFuture<String> value=new CompletableFuture<>();Clash.INSTANCE.invokeAction(new JSONObject().put("id","telemetry-native-"+method).put("method",method).put("data",JSONObject.NULL).toString(),(InvokeInterface)value::complete);JSONObject response=new JSONObject(value.get(10,TimeUnit.SECONDS));assertEquals(method,response.getString("method"));return response;}
