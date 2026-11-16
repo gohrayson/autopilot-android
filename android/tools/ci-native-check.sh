@@ -108,6 +108,21 @@ xml_status=${PIPESTATUS[0]}
 set -e
 if [[ "$gradle_status" -ne 0 ]]; then exit "$gradle_status"; fi
 if [[ "$xml_status" -ne 0 ]]; then exit "$xml_status"; fi
+# Retain the actual Activity image before standalone fixtures clear debug data.
+adb -s "$serial" exec-out run-as app.autopilot.android.debug cat files/network-telemetry-ui.png > "$results/network-telemetry-ui.png"
+python3 - "$results/network-telemetry-ui.png" <<'PY' | tee "$results/network-telemetry-ui-receipt.txt"
+from pathlib import Path
+import struct
+import sys
+image = Path(sys.argv[1])
+assert 24 <= image.stat().st_size <= 8 * 1024 * 1024, 'Telemetry screenshot size outside bound'
+with image.open('rb') as stream:
+    header = stream.read(24)
+assert header[:8] == b'\x89PNG\r\n\x1a\n' and header[12:16] == b'IHDR', 'Telemetry screenshot is not PNG'
+width, height = struct.unpack('>II', header[16:24])
+assert 16 <= width <= 8192 and 16 <= height <= 8192, 'Telemetry screenshot dimensions outside bound'
+print(f'ANDROID_TELEMETRY_UI_IMAGE_RECEIPT png=true width={width} height={height} bounded=true')
+PY
 node "$project/tools/ci-update-route-check.cjs" "$project" 2>&1 | tee "$results/update-https-runner.log"
 node "$project/tools/ci-tunnel-check.cjs" "$project" 2>&1 | tee "$results/tunnel-runner.log"
 node "$project/tools/ci-discovery-check.cjs" "$project" 2>&1 | tee "$results/discovery-runner.log"
