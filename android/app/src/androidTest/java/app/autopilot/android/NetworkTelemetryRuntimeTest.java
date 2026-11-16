@@ -58,8 +58,15 @@ public final class NetworkTelemetryRuntimeTest {
                 byte[] buffer=new byte[8192];while((read=body.read(buffer))!=-1)received+=read;
             }
             assertEquals(payload.length,received);served.get(10,TimeUnit.SECONDS);
-            NetworkTelemetryState.Pair after=NetworkTelemetryState.parsePair(Clash.INSTANCE.getTotalTraffic());NetworkTelemetryState.Pair ratesAfter=NetworkTelemetryState.parsePair(Clash.INSTANCE.getTraffic());
-            assertTrue("Native upload delta",after.up>before.up);assertTrue("Native download counts fixture payload",after.down-before.down>=payload.length);
+            // The client observes EOF before both native relay goroutines have
+            // necessarily published their final CountFunc totals. Await the same
+            // observable counters the production sampler reads; do not repeat or
+            // fabricate the transfer and do not relax either positive assertion.
+            long accountingDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+            NetworkTelemetryState.Pair after=NetworkTelemetryState.parsePair(Clash.INSTANCE.getTotalTraffic());
+            while((after.up<=before.up||after.down-before.down<payload.length)&&System.nanoTime()<accountingDeadline){Thread.sleep(25);after=NetworkTelemetryState.parsePair(Clash.INSTANCE.getTotalTraffic());}
+            NetworkTelemetryState.Pair ratesAfter=NetworkTelemetryState.parsePair(Clash.INSTANCE.getTraffic());
+            assertTrue("Native upload delta before="+before.up+" after="+after.up,after.up>before.up);assertTrue("Native download counts fixture payload before="+before.down+" after="+after.down,after.down-before.down>=payload.length);
             NetworkTelemetryState model=new NetworkTelemetryState(new NetworkTelemetryState.Pair(0,0),true);model.target(null,1,true);
             model.counters(1,before,ratesBefore,1,1);model.counters(1,after,ratesAfter,2001,2001);
             assertEquals(after.down-before.down,model.json().getJSONObject("traffic").getLong("sessionDownload"));
