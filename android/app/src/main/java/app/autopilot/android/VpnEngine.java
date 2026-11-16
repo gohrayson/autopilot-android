@@ -16,6 +16,7 @@ public final class VpnEngine {
     private static final String TUN_STACK="gvisor";
     private final AutopilotVpnService service;
     private final AutopilotApp app;
+    private final AndroidNetworkTelemetry telemetry;
     private final ScheduledExecutorService worker=Executors.newSingleThreadScheduledExecutor();
     private final ServiceChecks checks=new ServiceChecks();
     private final ReachabilityChecks candidateReachability=new ReachabilityChecks(),watchdogReachability=new ReachabilityChecks();
@@ -71,7 +72,10 @@ public final class VpnEngine {
     private long lastSweep;
     private long lastCurrentCheck,lastVerify,nextRecovery;private int recoveryAttempt,exploreCursor;private long nextTick;
     private File home;
-    public VpnEngine(AutopilotVpnService service,AutopilotApp app){this.service=service;this.app=app;this.discovery=createDiscovery();this.selectedProviderRecovery=new SelectedProviderRecovery(app::requestRecovery,()->app.log("provider","RECOVERY_QUEUE_FAILED"));}
+    public VpnEngine(AutopilotVpnService service,AutopilotApp app){this.service=service;this.app=app;
+        this.telemetry=new AndroidNetworkTelemetry(app.getSharedPreferences("network-telemetry",android.content.Context.MODE_PRIVATE),app::publishNetworkTelemetry);
+        this.discovery=createDiscovery();this.selectedProviderRecovery=new SelectedProviderRecovery(app::requestRecovery,()->app.log("provider","RECOVERY_QUEUE_FAILED"));}
+    public void refreshExitLocation(){telemetry.checkExitNow();}
     private DiscoveryCoordinator<Node> createDiscovery(){
         return new DiscoveryCoordinator<>(new DiscoveryCoordinator.Scheduler(){
             public void execute(Runnable job){submit(job::run);}
@@ -160,7 +164,7 @@ public final class VpnEngine {
         // The first serialized job publishes its phase before any startup I/O.
         phase="starting";busy=true;progress("preparing","Preparing connection");
         home=new File(app.getFilesDir(),"core");if(!home.isDirectory()&&!home.mkdirs())throw new IOException("CORE_STORAGE");
-        Clash.INSTANCE.load(app.getApplicationInfo().nativeLibraryDir);Clash.INSTANCE.assertReady();nativeReady=true;
+        Clash.INSTANCE.load(app.getApplicationInfo().nativeLibraryDir);Clash.INSTANCE.assertReady();nativeReady=true;telemetry.start();
         // Establish that this platform can accept our global configuration independently
         // of provider nodes. No Android interface exists while these semantic gates run.
         progress("settings","Checking VPN settings");
@@ -186,6 +190,7 @@ public final class VpnEngine {
     });}
     public void stop(){
         if(!stopping.compareAndSet(false,true))return;
+        telemetry.close();
         discovery.close();cancelDiscoveryNetwork();
         monitorTarget=null;watchdog.close();watchdogReachability.close();candidateReachability.close();checks.cancelActive();
         updateRoute=NO_UPDATE_ROUTE;
@@ -638,6 +643,8 @@ public final class VpnEngine {
         ConnectionWatchdog.Snapshot target=null;
         if(running.get()&&!stopping.get()&&nativeReady&&profileUsable&&tunReady&&current!=null){Integer port=ports.get(current.id);if(port!=null)target=new ConnectionWatchdog.Snapshot(profileGeneration,current.id,selectionEpoch,port);}
         if(!Objects.equals(monitorTarget,target)){monitorTarget=target;watchdog.target(target);}
+        NetworkTelemetryState.Route telemetryRoute=target==null?null:new NetworkTelemetryState.Route(profileGeneration,selectionEpoch,current.id,current.name,current.country,target.port);
+        telemetry.target(telemetryRoute,profileGeneration,running.get()&&!stopping.get()&&nativeReady);
         try{
             JSONArray rows=new JSONArray();ArrayList<SelectionPolicy.Health> ordered=new ArrayList<>(health.values());ordered.sort(SelectionPolicy.order(app.preferred(),now()));
             for(SelectionPolicy.Health h:ordered){Node n=findById(h.id);if(n==null)continue;
@@ -669,6 +676,7 @@ public final class VpnEngine {
         }catch(JSONException ignored){}
     }
     private void cleanup(){
+        telemetry.close();
         updateRoute=NO_UPDATE_ROUTE;
         running.set(false);invalidateMonitor();watchdog.close();watchdogReachability.close();candidateReachability.close();checks.close();
         discovery.close();discoveryReachability.close();for(ReachabilityChecks lane:discoveryFallback)lane.close();discoveryServices.close();discoveryProofWorker.shutdownNow();for(ExecutorService lane:discoveryFallbackWorkers)lane.shutdownNow();nativeDeadlines.shutdownNow();

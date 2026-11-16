@@ -43,9 +43,9 @@ public final class UpdateStatusUiTest {
         try(Fixture fixture=new Fixture()){
             Gate timeout=fixture.transport.next("timeout",false);
             fixture.open();
-            fixture.assertButtonColors("updateCheck",true,0xffedf2ff,0xff315fea);
-            fixture.assertButtonColors("updateDownload",false,0xffe3e5e9,0xff8b919c);
-            fixture.assertButtonColors("updateInstall",false,0xffe3e5e9,0xff8b919c);
+            fixture.assertButtonColors("updateCheck",true,0xff142d45,0xff7ea8ff);
+            fixture.assertButtonColors("updateDownload",false,0xff152536,0xff6f8299);
+            fixture.assertButtonColors("updateInstall",false,0xff152536,0xff6f8299);
             fixture.click("updateCheck");
             assertTrue(timeout.opened.await(5,TimeUnit.SECONDS));
             assertEquals("checking",fixture.manager.state().optString("phase"));
@@ -54,8 +54,8 @@ public final class UpdateStatusUiTest {
             assertFalse(fixture.enabled("updateCheck"));
             assertFalse(fixture.enabled("updateDownload"));
             assertFalse(fixture.enabled("updateInstall"));
-            fixture.assertButtonColors("updateCheck",false,0xffe3e5e9,0xff8b919c);
-            fixture.assertButtonColors("updateInstall",false,0xffe3e5e9,0xff8b919c);
+            fixture.assertButtonColors("updateCheck",false,0xff152536,0xff6f8299);
+            fixture.assertButtonColors("updateInstall",false,0xff152536,0xff6f8299);
             fixture.assertSpinner(true);
             assertTrue(fixture.text("updateDialogStatus").contains("Checking for updates…"));
             assertTrue(fixture.text("updateActionHint").contains("Contacting updates.example.org"));
@@ -71,7 +71,7 @@ public final class UpdateStatusUiTest {
             assertTrue(fixture.text("updateDialogStatus").contains("UPDATE_TIMEOUT"));
             assertEquals("Check now",fixture.text("updateCheck"));
             assertTrue(fixture.enabled("updateCheck"));
-            fixture.assertButtonColors("updateCheck",true,0xffedf2ff,0xff315fea);
+            fixture.assertButtonColors("updateCheck",true,0xff142d45,0xff7ea8ff);
             fixture.assertSpinner(false);
 
             fixture.transport.next("http",true);
@@ -92,8 +92,8 @@ public final class UpdateStatusUiTest {
             assertTrue(fixture.text("updateDialogStatus").contains("99.0.0-ui is available"));
             assertTrue(fixture.enabled("updateDownload"));
             assertFalse(fixture.enabled("updateInstall"));
-            fixture.assertButtonColors("updateDownload",true,0xffedf2ff,0xff315fea);
-            fixture.assertButtonColors("updateInstall",false,0xffe3e5e9,0xff8b919c);
+            fixture.assertButtonColors("updateDownload",true,0xff142d45,0xff7ea8ff);
+            fixture.assertButtonColors("updateInstall",false,0xff152536,0xff6f8299);
             assertTrue(fixture.text("updateActionHint").contains("Tap Download update first"));
             assertEquals("Rejected stale action must not add a request",4,fixture.transport.requests.get());
             assertNull("The update UI must never start a VPN",fixture.app.engine);
@@ -118,8 +118,8 @@ public final class UpdateStatusUiTest {
             assertEquals(0,fixture.transport.requests.get());
             assertTrue(fixture.enabled("updateInstall"));
             assertFalse(fixture.enabled("updateDownload"));
-            fixture.assertButtonColors("updateInstall",true,0xff315fea,0xffffffff);
-            fixture.assertButtonColors("updateDownload",false,0xffe3e5e9,0xff8b919c);
+            fixture.assertButtonColors("updateInstall",true,0xff51e1e8,0xff07101b);
+            fixture.assertButtonColors("updateDownload",false,0xff152536,0xff6f8299);
             assertTrue(fixture.text("updateActionHint").contains("Automatic checks wait"));
 
             fixture.transport.next("network",true);

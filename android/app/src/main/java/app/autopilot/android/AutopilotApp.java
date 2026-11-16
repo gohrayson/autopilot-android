@@ -19,6 +19,7 @@ public final class AutopilotApp extends Application {
     public final ExecutorService providerExecutor = Executors.newSingleThreadExecutor();
     public volatile String providerBusy = "";
     private volatile JSONObject snapshot = new JSONObject();
+    private volatile JSONObject networkTelemetry = new NetworkTelemetryState(null,true).json();
     private volatile String nodeFingerprint="";
     private volatile JSONObject lastCoreDiagnostic;
     private volatile JSONObject currentCoreDiagnostic;
@@ -33,6 +34,7 @@ public final class AutopilotApp extends Application {
         super.onCreate();
         try(InputStream contract=getAssets().open("product-contract.json")){ProductContract.install(contract);}catch(Exception invalid){throw new IllegalStateException("Product contract is unavailable",invalid);}
         prefs = getSharedPreferences("preferences", MODE_PRIVATE);
+        networkTelemetry=AndroidNetworkTelemetry.idleStatus(getSharedPreferences("network-telemetry",MODE_PRIVATE));
         GeoRouting.ensure(this);
         try{
             JSONObject saved=new JSONObject(prefs.getString("productSettings","{}"));
@@ -84,7 +86,8 @@ public final class AutopilotApp extends Application {
         List<String> copy=new ArrayList<>(names);
         providerExecutor.execute(()->{try{providers.refreshFailedNodes(copy,preferred());}catch(ProviderException ex){log("provider",ex.code);}});
     }
-    public JSONObject state(){return snapshot;}
+    public void publishNetworkTelemetry(JSONObject telemetry){networkTelemetry=telemetry;changed();}
+    public JSONObject state(){try{return new JSONObject(snapshot.toString()).put("network",new JSONObject(networkTelemetry.toString()));}catch(JSONException impossible){throw new IllegalStateException(impossible);}}
     /** Persisted failures are history until a current run reports another rejection. */
     public JSONObject coreDiagnostic(){JSONObject saved=currentCoreDiagnostic;return saved==null?null:CoreDiagnostics.restore(saved);}
     public JSONObject historicalCoreDiagnostic(){JSONObject saved=lastCoreDiagnostic;return saved==null?null:CoreDiagnostics.restore(saved);}
@@ -141,6 +144,10 @@ public final class AutopilotApp extends Application {
         JSONObject network=s.optJSONObject("networkSignals");if(network!=null)out.append("Native network observations (session only, not per-node): ").append(network).append("\n");
         JSONObject watchdog=s.optJSONObject("watchdog");if(watchdog!=null)out.append("Active HTTPS watchdog: ").append(watchdog).append("\n");
         JSONObject discovery=s.optJSONObject("discovery");if(discovery!=null)out.append("Node discovery: ").append(discovery).append("\n");
+        JSONObject telemetry=s.optJSONObject("network");if(telemetry!=null){JSONObject exit=telemetry.optJSONObject("exit"),traffic=telemetry.optJSONObject("traffic");
+            out.append("Exit measurement: ").append(exit==null?"STOPPED":exit.optString("code","STOPPED")).append("\n")
+                .append("VPN traffic counters: ").append(traffic==null?"STOPPED":traffic.optString("code","STOPPED")).append("\n")
+                .append("Recorded usage storage: ").append(traffic==null?"unavailable":traffic.optString("persistence","unavailable")).append("\n");}
         if(updates!=null)out.append(updates.diagnostic());
         JSONArray skipped=s.optJSONArray("skippedNodes");if(skipped!=null&&skipped.length()>0)out.append("Skipped diagnostics: ").append(skipped).append("\n");
         for(String p:List.of("onevpn","octohide","import")){

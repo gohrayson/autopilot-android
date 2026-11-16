@@ -42,15 +42,25 @@ public final class ProviderException extends Exception {
     public final int httpStatus;
     public final long retryAt;
     public final String providerCode;
+    public final String origin;
+    public final int attempt;
 
     public ProviderException(String code, String stage) { this(code, stage, 0, 0, null); }
     public ProviderException(String code, String stage, int httpStatus, long retryAt, String providerCode) {
+        this(code, stage, httpStatus, retryAt, providerCode, null, 0);
+    }
+    private ProviderException(String code, String stage, int httpStatus, long retryAt, String providerCode, String origin, int attempt) {
         super(MESSAGES.getOrDefault(code, MESSAGES.get("PROVIDER_ERROR")));
         this.code = MESSAGES.containsKey(code) ? code : "PROVIDER_ERROR";
         this.stage = stage != null && stage.matches("[a-z-]{1,40}") ? stage : "request";
         this.httpStatus = httpStatus >= 100 && httpStatus <= 599 ? httpStatus : 0;
         this.retryAt = Math.max(0, retryAt);
         this.providerCode = providerCode != null && providerCode.matches("[A-Z_]{1,50}") ? providerCode : null;
+        this.origin = ProviderHttp.oneOriginIds().contains(origin) ? origin : null;
+        this.attempt = this.origin != null && attempt >= 1 && attempt <= ProviderHttp.oneOriginIds().size() ? attempt : 0;
+    }
+    ProviderException withOneTransport(String origin, int attempt) {
+        return new ProviderException(code, stage, httpStatus, retryAt, providerCode, origin, attempt);
     }
 
     public JSONObject diagnostic(String provider, String operation, long at) {
@@ -61,6 +71,8 @@ public final class ProviderException extends Exception {
             if (httpStatus > 0) result.put("httpStatus", httpStatus);
             if (retryAt > 0) result.put("retryAt", retryAt);
             if (providerCode != null) result.put("providerCode", providerCode);
+            if ("onevpn".equals(provider) && origin != null) result.put("origin", origin);
+            if ("onevpn".equals(provider) && attempt > 0) result.put("attempt", attempt);
         } catch (Exception ignored) { }
         return result;
     }

@@ -22,8 +22,9 @@ import java.util.*;
 
 /** Native Android UI. Network and account operations always run off the main thread. */
 public final class MainActivity extends Activity {
-    private static final int BLUE=0xff315fea, INK=0xff15233c, MUTED=0xff64728b, GREEN=0xff16865d, RED=0xffb53636;
-    private static final int DISABLED_BUTTON_BACKGROUND=0xffe3e5e9, DISABLED_BUTTON_TEXT=0xff8b919c, SECONDARY_BUTTON_BACKGROUND=0xffedf2ff;
+    private static final int BLUE=0xff7ea8ff, CYAN=0xff51e1e8, INK=0xfff0f6ff, MUTED=0xff9bb0c9, GREEN=0xff53dfad, RED=0xffff8e9e;
+    private static final int BACKGROUND=0xff07101b,SURFACE=0xff0c1b2b;
+    private static final int DISABLED_BUTTON_BACKGROUND=0xff152536, DISABLED_BUTTON_TEXT=0xff6f8299, SECONDARY_BUTTON_BACKGROUND=0xff142d45;
     private AutopilotApp app;
     private LinearLayout content, nodeList;
     private TextView phase, selected, detail, connectionHealth, countries, oneStatus, octoStatus, importStatus, routingStatus, nodeSummary, error, updateSummary;
@@ -35,6 +36,8 @@ public final class MainActivity extends Activity {
     private Button updateCheck, updateDownload, updateInstall, updatePause;
     private String lastRenderedNodes;
     private Button connect, auto, retest;
+    private TextView networkExit,networkExitDetail,trafficRates,trafficSession,trafficTotal;
+    private Button refreshExit;
     private final Runnable render = this::render;
     private boolean visible;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -42,7 +45,9 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state); app=(AutopilotApp)getApplication();
-        ScrollView scroll=new ScrollView(this); scroll.setFillViewport(true); scroll.setBackgroundColor(0xfff4f6fb);
+        getWindow().setStatusBarColor(BACKGROUND);getWindow().setNavigationBarColor(BACKGROUND);
+        getWindow().getDecorView().setSystemUiVisibility(getWindow().getDecorView().getSystemUiVisibility()&~(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR));
+        ScrollView scroll=new ScrollView(this); scroll.setFillViewport(true); scroll.setBackgroundColor(BACKGROUND);
         content=column(); content.setPadding(dp(18),dp(12),dp(18),dp(28)); scroll.addView(content);
         if(Build.VERSION.SDK_INT>=30)scroll.setOnApplyWindowInsetsListener((view,insets)->{
             android.graphics.Insets i=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());
@@ -54,6 +59,7 @@ public final class MainActivity extends Activity {
         LinearLayout header=row();
         TextView title=text("Autopilot",30,INK); title.setTypeface(null,Typeface.BOLD); header.addView(title,new LinearLayout.LayoutParams(0,-2,1));
         Button menu=button("•••",false); menu.setContentDescription("More options"); menu.setOnClickListener(v->menu(menu)); header.addView(menu); content.addView(header);
+        addText(content,"CONNECTION CONTROL",11,CYAN);
         addText(content,"Your VPN, on autopilot",15,MUTED);
 
         LinearLayout status=card(); phase=addText(status,"Ready to start",14,BLUE); selected=addText(status,"Connect an account",25,INK); selected.setTypeface(null,Typeface.BOLD);
@@ -63,6 +69,14 @@ public final class MainActivity extends Activity {
         connect=button("Start VPN",true); connect.setOnClickListener(v->toggleVpn()); status.addView(connect,full());
         LinearLayout actions=row(); auto=button("Resume Auto",false); auto.setOnClickListener(v->{if(app.engine!=null){if(app.settings().optBoolean("paused")||app.state().optBoolean("pinned"))app.engine.resumeAuto();else app.engine.pauseAuto();}}); actions.addView(auto,new LinearLayout.LayoutParams(0,-2,1));
         retest=button("Re-test",false); retest.setOnClickListener(v->{if(app.engine!=null)app.engine.retest();}); actions.addView(retest,new LinearLayout.LayoutParams(0,-2,1));status.addView(actions);content.addView(status);
+
+        LinearLayout network=card();section(network,"Exit location & traffic");
+        networkExit=addText(network,"Connect VPN to measure its public IP",19,CYAN);networkExit.setTypeface(Typeface.MONOSPACE,Typeface.BOLD);
+        networkExitDetail=addText(network,"Measured location is separate from the node’s advertised country.",13,MUTED);
+        refreshExit=button("Check exit location",false);refreshExit.setOnClickListener(v->{if(app.engine!=null)app.engine.refreshExitLocation();});network.addView(refreshExit,full());
+        trafficRates=addText(network,"↓ — /s    ↑ — /s",20,INK);trafficRates.setTypeface(Typeface.MONOSPACE,Typeface.BOLD);
+        trafficSession=addText(network,"This VPN session: —",13,MUTED);trafficTotal=addText(network,"Recorded total: —",13,MUTED);
+        addText(network,"Counts traffic handled by the VPN core, including checks and direct rules. Apps excluded from VPN are not counted. Rates show current usage, not maximum connection speed.",12,MUTED);content.addView(network);
 
         LinearLayout country=card();section(country,"Preferred countries");countries=addText(country,"Fastest healthy node anywhere",15,INK);
         addText(country,"Uses your first country with healthy, service-checked nodes. Falls back to other countries when needed.",13,MUTED);
@@ -105,6 +119,7 @@ public final class MainActivity extends Activity {
     private void render(){
         if(isFinishing())return;
         JSONObject s=app.state();String p=s.optString("phase","idle"),current=s.optString("current","");
+        renderNetwork(s.optJSONObject("network"));
         boolean running=app.engine!=null && !Set.of("stopped","idle","error").contains(p);
         boolean connected=p.equals("connected")&&!current.isEmpty();
         JSONObject watchdog=s.optJSONObject("watchdog");
@@ -157,7 +172,7 @@ public final class MainActivity extends Activity {
         for(int i=0;i<list.length();i++){
             JSONObject node=list.optJSONObject(i);if(node==null)continue;String name=node.optString("name");
             LinearLayout line=column();line.setPadding(dp(10),dp(12),dp(10),dp(12));
-            if(name.equals(current))line.setBackground(background(0xffedf2ff,10));
+            if(name.equals(current))line.setBackground(background(0xff163249,10));
             TextView label=addText(line,(name.equals(current)?"●  ":"")+name,16,INK);label.setTypeface(null,Typeface.BOLD);
             int latency=node.optInt("latency",-1);
             addText(line,node.optString("provider")+" · "+node.optString("country")+" · "+(latency>0?latency+" ms":node.optString("status","Not tested")),13,MUTED);
@@ -166,9 +181,25 @@ public final class MainActivity extends Activity {
             String checks="Claude "+mark(node.optString("claude"))+"    ChatGPT "+mark(node.optString("chatgpt"))+"    Gemini "+mark(node.optString("gemini"));
             addText(line,checks,12,MUTED);line.setOnClickListener(v->{if(app.engine!=null){app.engine.select(name,false);toast("Checking node before switching…");}else toast("Start the VPN first");});
             line.setOnLongClickListener(v->{if(app.engine!=null)new AlertDialog.Builder(this).setTitle("Pin this node?").setMessage("Autopilot will hold this node until you Resume Auto. It can still recover if the node stops working.").setPositiveButton("Pin",(d,w)->app.engine.select(name,true)).setNegativeButton("Cancel",null).show();return true;});
-            nodeList.addView(line);View divider=new View(this);divider.setBackgroundColor(0xffe9edf4);nodeList.addView(divider,new LinearLayout.LayoutParams(-1,dp(1)));
+            nodeList.addView(line);View divider=new View(this);divider.setBackgroundColor(0xff20364c);nodeList.addView(divider,new LinearLayout.LayoutParams(-1,dp(1)));
         }
     }
+    private void renderNetwork(JSONObject network){
+        JSONObject exit=network==null?null:network.optJSONObject("exit"),traffic=network==null?null:network.optJSONObject("traffic");
+        String exitPhase=exit==null?"idle":exit.optString("phase","idle");
+        String code=exit==null?"":exit.optString("country","");boolean measured=Set.of("verified","mismatch").contains(exitPhase);
+        networkExit.setText(measured?countryName(code)+" · "+exit.optString("ip"):exitPhase.equals("checking")?"Measuring VPN exit…":exitPhase.equals("unavailable")?"Exit location unavailable":"Connect VPN to measure its public IP");
+        networkExit.setTextColor(exitPhase.equals("mismatch")?RED:CYAN);
+        String expected=exit==null?"":exit.optString("expectedCountry","");long checked=exit==null?0:exit.optLong("checkedAt");
+        networkExitDetail.setText(measured?(exitPhase.equals("mismatch")?"Country differs from node label ("+expected+"). ":"VPN exit measured. ")+"Cloudflare IP location"+(checked>0?" · "+DateFormat.getTimeInstance(DateFormat.MEDIUM).format(new Date(checked)):"")+". Geolocation is approximate.":exitPhase.equals("unavailable")?"The lookup failed. This does not by itself mean the VPN is down. Check again when connected.":"Uses the selected VPN route; old measurements clear when the route changes.");
+        refreshExit.setEnabled(app.engine!=null&&!exitPhase.equals("checking")&&!exitPhase.equals("idle"));
+        trafficRates.setText("↓ "+trafficRate(traffic,"downloadRate")+"    ↑ "+trafficRate(traffic,"uploadRate"));
+        trafficSession.setText("This VPN session: ↓ "+trafficBytes(traffic,"sessionDownload")+"  ↑ "+trafficBytes(traffic,"sessionUpload"));
+        String unavailable=traffic!=null&&"unavailable".equals(traffic.optString("phase"))?" · counters unavailable":"";
+        trafficTotal.setText("Recorded total: ↓ "+trafficBytes(traffic,"totalDownload")+"  ↑ "+trafficBytes(traffic,"totalUpload")+unavailable);
+    }
+    static String trafficBytes(JSONObject values,String key){if(values==null||values.isNull(key)||!values.has(key))return "—";Object raw=values.opt(key);if(!(raw instanceof Number))return "—";double number=((Number)raw).doubleValue();if(!Double.isFinite(number)||number<0||number>NetworkTelemetryState.MAX_COUNTER)return "—";String[] units={"B","KiB","MiB","GiB","TiB","PiB"};int unit=0;while(number>=1024&&unit<units.length-1){number/=1024;unit++;}return String.format(Locale.ROOT,unit==0?"%.0f %s":"%.1f %s",number,units[unit]);}
+    static String trafficRate(JSONObject values,String key){String bytes=trafficBytes(values,key);return bytes.equals("—")?"— /s":bytes+"/s";}
     static boolean healthUncertain(JSONObject watchdog,long now){
         if(watchdog==null)return false;
         String code=watchdog.optString("code");
@@ -447,12 +478,12 @@ public final class MainActivity extends Activity {
     private TextView text(String label,int size,int color){TextView text=new TextView(this);text.setText(label);text.setTextSize(size);text.setTextColor(color);text.setLineSpacing(dp(3),1);return text;}
     private TextView addText(LinearLayout target,String label,int size,int color){TextView text=text(label,size,color);LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);params.bottomMargin=dp(8);target.addView(text,params);return text;}
     private void section(LinearLayout card,String label){TextView text=addText(card,label,18,INK);text.setTypeface(null,Typeface.BOLD);}
-    private LinearLayout card(){LinearLayout card=column();card.setPadding(dp(18),dp(18),dp(18),dp(14));card.setBackground(background(Color.WHITE,18));LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);params.topMargin=dp(16);card.setLayoutParams(params);return card;}
+    private LinearLayout card(){LinearLayout card=column();card.setPadding(dp(18),dp(18),dp(18),dp(14));GradientDrawable surface=background(SURFACE,18);surface.setStroke(dp(1),0xff21364d);card.setBackground(surface);LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);params.topMargin=dp(16);card.setLayoutParams(params);return card;}
     private Button button(String text,boolean primary){
         Button button=new Button(this);button.setText(text);button.setAllCaps(false);button.setTextSize(14);button.setMinHeight(dp(46));
         int[][] states={new int[]{-android.R.attr.state_enabled},new int[]{}};
-        button.setBackgroundTintList(new android.content.res.ColorStateList(states,new int[]{DISABLED_BUTTON_BACKGROUND,primary?BLUE:SECONDARY_BUTTON_BACKGROUND}));
-        button.setTextColor(new android.content.res.ColorStateList(states,new int[]{DISABLED_BUTTON_TEXT,primary?Color.WHITE:BLUE}));
+        button.setBackgroundTintList(new android.content.res.ColorStateList(states,new int[]{DISABLED_BUTTON_BACKGROUND,primary?CYAN:SECONDARY_BUTTON_BACKGROUND}));
+        button.setTextColor(new android.content.res.ColorStateList(states,new int[]{DISABLED_BUTTON_TEXT,primary?BACKGROUND:BLUE}));
         return button;
     }
     private GradientDrawable background(int color,int radius){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));return d;}

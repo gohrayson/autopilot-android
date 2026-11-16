@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "productVersion": "0.4.6",
-  "androidVersionCode": 16,
+  "productVersion": "0.5.0",
+  "androidVersionCode": 19,
   "services": [
     "claude",
     "chatgpt",
@@ -334,6 +334,49 @@
         "windows",
         "android"
       ]
+    },
+    {
+      "id": "exit_ip_geography",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "vpn_traffic_counters",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "onevpn_api_failover",
+      "platforms": [
+        "windows",
+        "android"
+      ]
+    },
+    {
+      "id": "system_proxy_guard",
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "id": "whole_pc_protection",
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "id": "tun_routing",
+      "platforms": [
+        "android"
+      ]
     }
+  ],
+  "platforms": [
+    "windows",
+    "android"
   ]
 }
