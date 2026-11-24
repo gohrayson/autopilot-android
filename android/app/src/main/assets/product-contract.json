@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "productVersion": "0.5.1",
-  "androidVersionCode": 20,
+  "productVersion": "0.5.2",
+  "androidVersionCode": 21,
   "services": [
     "claude",
     "chatgpt",
