@@ -202,7 +202,7 @@ public final class VpnEngine {
         try{worker.execute(()->{Thread.interrupted();cleanup();});}catch(RejectedExecutionException ignored){cleanup();}
     }
     boolean providerWorkAllowed(){return running.get()&&!stopping.get();}
-    boolean accountRecoveryJobAllowed(){return providerWorkAllowed()&&nativeReady&&!paused()&&app.settings().optBoolean("autoRefresh");}
+    boolean accountRecoveryJobAllowed(){return providerWorkAllowed()&&nativeReady&&!paused()&&AccountRecoveryPolicy.enabled(app.settings());}
     boolean accountRecoveryAllowed(){return accountRecoveryJobAllowed()&&tunReady&&profileUsable;}
     long accountRecoveryPendingUntil(){return accountRecoveryTrigger.pendingUntil();}
     public void retest(){requestedRetest.incrementAndGet();forceSweepRequested.set(true);if(!profileUsable||nodes.isEmpty()&&!coreSkipped.isEmpty())nodesChanged();else queueSweep(true);}

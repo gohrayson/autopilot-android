@@ -26,4 +26,5 @@ final class AccountRecoveryPolicy {
         return Collections.unmodifiableSet(values);
     }
     void reason(String value){if(!reasons.contains(value))throw new IllegalArgumentException("ACCOUNT_RECOVERY_REASON_INVALID");}
+    static boolean enabled(JSONObject settings){Object raw=settings==null?null:settings.opt("autoRefresh");if(!(raw instanceof Boolean))throw new IllegalArgumentException("AUTO_REFRESH_SETTING_INVALID");return (Boolean)raw;}
 }

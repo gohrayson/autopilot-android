@@ -103,7 +103,7 @@ public final class AutopilotApp extends Application {
     public void requestAccountRecovery(String reason){if(providerJobs!=null)providerJobs.catalogs(reason);}
     public void publishNetworkTelemetry(JSONObject telemetry){networkTelemetry=telemetry;changed();}
     public JSONObject state(){try{
-        JSONObject result=new JSONObject(snapshot.toString());VpnEngine owner=engine;boolean active=owner!=null&&owner.providerWorkAllowed()&&!settings().optBoolean("paused")&&settings().optBoolean("autoRefresh");
+        JSONObject result=new JSONObject(snapshot.toString());VpnEngine owner=engine;boolean active=owner!=null&&owner.providerWorkAllowed()&&!settings().optBoolean("paused")&&AccountRecoveryPolicy.enabled(settings());
         boolean healthy=false;String selected=result.optString("current");JSONObject watchdog=result.optJSONObject("watchdog");String code=watchdog==null?"":watchdog.optString("code");JSONArray rows=result.optJSONArray("nodes");
         if("connected".equals(result.optString("phase"))&&Set.of("HEALTHY","IDLE","CHECKING").contains(code)&&rows!=null&&!selected.isEmpty())for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&selected.equals(row.optString("name"))&&row.optBoolean("qualified"))healthy=true;}
         return result.put("network",new JSONObject(networkTelemetry.toString())).put("accountRecovery",AccountRecoveryStatus.lifecycle(providers==null?null:providers.recoveryStatus(),active,healthy,owner==null?0:owner.accountRecoveryPendingUntil(),System.currentTimeMillis()));

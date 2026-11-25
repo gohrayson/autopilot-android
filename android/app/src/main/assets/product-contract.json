@@ -118,6 +118,10 @@
       "minItems": 0,
       "maxItems": 500,
       "default": []
+    },
+    "autoRefresh": {
+      "type": "boolean",
+      "default": true
     }
   },
   "policy": {

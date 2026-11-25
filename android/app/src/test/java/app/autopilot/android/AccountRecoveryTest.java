@@ -17,6 +17,19 @@ public final class AccountRecoveryTest {
     }
     private static void refresh(ProviderRepository repository){repository.refreshCatalogsForRecovery("persistent-service-degraded",PREFERRED,()->true);}
 
+    @Test public void validatedDefaultActuallyEnablesRecoveryAndTheControlIsTypedPortableAndPersistent()throws Exception{
+        JSONObject defaults=ProductSettings.merge(null,new JSONObject());assertTrue(defaults.has("autoRefresh"));assertTrue(AccountRecoveryPolicy.enabled(defaults));
+        JSONObject disabled=ProductSettings.merge(defaults,new JSONObject().put("autoRefresh",false));assertFalse(AccountRecoveryPolicy.enabled(disabled));
+        JSONObject saved=new JSONObject(disabled.toString());assertFalse(AccountRecoveryPolicy.enabled(ProductSettings.merge(null,saved)));
+        assertFalse(ProductSettings.portablePatch(ProductSettings.portable(disabled)).getBoolean("autoRefresh"));
+        assertTrue(AccountRecoveryPolicy.enabled(ProductSettings.merge(disabled,new JSONObject().put("autoRefresh",true))));
+        for(Object invalid:List.of("true",1,JSONObject.NULL)){
+            try{ProductSettings.merge(defaults,new JSONObject().put("autoRefresh",invalid));fail("Bad setting type accepted");}catch(IllegalArgumentException expected){}
+            try{AccountRecoveryPolicy.enabled(new JSONObject().put("autoRefresh",invalid));fail("Gate hid invalid setting type");}catch(IllegalArgumentException expected){}
+        }
+        try{AccountRecoveryPolicy.enabled(new JSONObject());fail("Missing settings contract must not silently disable recovery");}catch(IllegalArgumentException expected){}
+    }
+
     @Test public void exactSharedRecoveryScenariosDriveTheActualTrigger()throws Exception{
         JSONObject fixtures;try(InputStream input=getClass().getResourceAsStream("/policy-scenarios.json")){assertNotNull(input);fixtures=new JSONObject(new String(input.readAllBytes(),StandardCharsets.UTF_8));}
         JSONArray cases=fixtures.getJSONArray("accountRecoveryCases");assertTrue(cases.length()>0);

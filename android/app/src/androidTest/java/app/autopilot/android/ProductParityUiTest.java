@@ -35,12 +35,12 @@ public final class ProductParityUiTest {
             activity=(MainActivity)i.startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));i.waitForIdleSync();
             MainActivity current=activity;
             selection=dialog(i,current,"settingsDialog");AlertDialog selected=selection;
-            List<CheckBox> checks=views(selected.getWindow().getDecorView(),CheckBox.class);assertEquals(ProductContract.services().size(),checks.size());
+            List<CheckBox> checks=views(selected.getWindow().getDecorView(),CheckBox.class);assertEquals(ProductContract.services().size()+1,checks.size());CheckBox accountRefresh=checks.get(checks.size()-1);assertTrue("Default typed setting enables automatic account recovery",accountRefresh.isChecked());assertTrue(accountRefresh.getText().toString().contains("account servers"));
             List<EditText> fields=views(selected.getWindow().getDecorView(),EditText.class);assertEquals(8,fields.size());
             i.runOnMainSync(()->{for(CheckBox check:checks)check.setChecked(false);selected.getButton(AlertDialog.BUTTON_POSITIVE).performClick();});i.waitForIdleSync();
             assertTrue("Invalid empty services keep editor open",selected.isShowing());assertEquals(ProductContract.services(),new ArrayList<>(ProductSettings.strings(app.settings().optJSONArray("required"))));
             i.runOnMainSync(()->{checks.get(0).setChecked(true);selected.getButton(AlertDialog.BUTTON_POSITIVE).performClick();});i.waitForIdleSync();
-            assertFalse(selected.isShowing());assertEquals(1,app.settings().getJSONArray("required").length());
+            assertFalse(selected.isShowing());assertEquals(1,app.settings().getJSONArray("required").length());assertFalse("Recovery switch persists with the atomic selection settings save",AccountRecoveryPolicy.enabled(app.settings()));
             routing=dialog(i,current,"splitDialog");AlertDialog split=routing;List<EditText> websites=views(split.getWindow().getDecorView(),EditText.class);assertEquals(2,websites.size());
             i.runOnMainSync(()->{websites.get(0).setText("test.example");websites.get(1).setText("https://test.example/");split.getButton(AlertDialog.BUTTON_POSITIVE).performClick();});i.waitForIdleSync();
             assertTrue("Conflicting routes do not partially save",split.isShowing());assertEquals(0,app.settings().getJSONArray("directDomains").length());
@@ -53,7 +53,7 @@ public final class ProductParityUiTest {
             JSONObject account=new JSONObject().put("username","fixture@example.invalid").put("connected",true).put("paid",true).put("subscriptionEnd",System.currentTimeMillis()+86400000).put("lastRefresh",System.currentTimeMillis()).put("phase","ready").put("nodeCount",47);
             String metadata=MainActivity.accountSummary(account,System.currentTimeMillis());assertTrue(metadata.contains("Paid subscription"));assertTrue(metadata.contains("Servers refreshed:"));assertTrue(MainActivity.importSummary(new JSONObject().put("nodeCount",2).put("phase","ready")).contains("2 imported nodes"));
             assertNull("UI must not start VPN",app.engine);assertTrue("UI must not call provider APIs",app.providers.nodes().isEmpty());
-            System.out.println("AUTOPILOT_PRODUCT_PARITY_UI_ACCEPTED settingsAtomic=true requiredServices=true websiteConflictGuard=true explicitAppModes=true stagedListCopy=true replaceConfirmation=true cancelUnchanged=true independentAppLists=true emptyDestinationCopy=true globalMode=true pauseState=true providerMetadata=true importedStatus=true noVpnMutation=true pinnedGeo=true nativeRuleAndGlobalAccepted=true");
+            System.out.println("AUTOPILOT_PRODUCT_PARITY_UI_ACCEPTED settingsAtomic=true requiredServices=true automaticAccountRecoveryControl=true websiteConflictGuard=true explicitAppModes=true stagedListCopy=true replaceConfirmation=true cancelUnchanged=true independentAppLists=true emptyDestinationCopy=true globalMode=true pauseState=true providerMetadata=true importedStatus=true noVpnMutation=true pinnedGeo=true nativeRuleAndGlobalAccepted=true");
         }finally{
             if(selection!=null){AlertDialog close=selection;i.runOnMainSync(close::dismiss);}if(routing!=null){AlertDialog close=routing;i.runOnMainSync(close::dismiss);}
             if(activity!=null){MainActivity close=activity;i.runOnMainSync(close::finish);i.waitForIdleSync();}app.setSettings(prior);app.publish(state);app.updates.preferences(automatic,wifi,install);

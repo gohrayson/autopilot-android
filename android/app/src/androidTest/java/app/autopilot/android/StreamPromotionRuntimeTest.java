@@ -49,6 +49,9 @@ public final class StreamPromotionRuntimeTest {
             String nonce=UUID.randomUUID().toString();write(context,READY,new JSONObject().put("uid",android.os.Process.myUid()).put("tun",true).put("marker",fixture.marker).put("nonce",nonce));
             await(35000,()->fixture.acknowledged.get()>=3,"Separate-UID established stream acknowledgements");
             VpnEngine engine=app.engine;assertNotNull(engine);
+            evidence.put("accountRecoverySettings",new JSONObject().put("hasAutoRefresh",app.settings().has("autoRefresh")).put("enabled",AccountRecoveryPolicy.enabled(app.settings())).put("engineAllowed",engine.accountRecoveryAllowed()));
+            assertTrue("The shared default must enable account recovery without a fixture override",AccountRecoveryPolicy.enabled(app.settings()));
+            assertTrue("Production engine lifecycle must allow account recovery before incident evidence",engine.accountRecoveryAllowed());
             int beforeRefreshAcks=fixture.acknowledged.get();
             // Controlled selected-service evidence and elapsed incident time on the
             // real controller. Production policy durations remain unmodified and
@@ -56,13 +59,19 @@ public final class StreamPromotionRuntimeTest {
             onWorker(engine,()->{
                 Node selected=(Node)field(engine,"current");
                 @SuppressWarnings("unchecked") Map<String,SelectionPolicy.Health> ledger=(Map<String,SelectionPolicy.Health>)field(engine,"health");
-                ledger.get(selected.id).chatgpt="error";
+                SelectionPolicy.Health selectedHealth=ledger.get(selected.id);assertNotNull(selectedHealth);assertTrue("Initial real HTTPS proof must be fresh before degraded fixture",selectedHealth.retainSelectedTransport(System.currentTimeMillis()));
+                selectedHealth.chatgpt="error";assertFalse("The required service failure must make cached qualification false",selectedHealth.qualified(System.currentTimeMillis()));
                 Field checked=VpnEngine.class.getDeclaredField("accountRecoveryAlternativesChecked");checked.setAccessible(true);checked.setBoolean(engine,true);
                 invoke(engine,"warnRetainedServicePath");invokeRecoveryObservation(engine);
                 AccountRecoveryTrigger trigger=(AccountRecoveryTrigger)field(engine,"accountRecoveryTrigger");
-                Field since=AccountRecoveryTrigger.class.getDeclaredField("degradedAt");since.setAccessible(true);since.setLong(trigger,System.currentTimeMillis()-new AccountRecoveryPolicy().persistentDegradedMs);
+                Field since=AccountRecoveryTrigger.class.getDeclaredField("degradedAt");since.setAccessible(true);assertTrue("Actual engine evidence must start the persistent-degradation gate",since.getLong(trigger)>0);
+                evidence.put("accountRecoveryGateStarted",true);since.setLong(trigger,System.currentTimeMillis()-new AccountRecoveryPolicy().persistentDegradedMs);
+                int requestsBefore=events(app,"ACCOUNT_RECOVERY_REQUESTED");
                 invokeRecoveryObservation(engine);
+                assertEquals("Elapsed actual engine gate must emit its background recovery request",requestsBefore+1,events(app,"ACCOUNT_RECOVERY_REQUESTED"));
+                evidence.put("accountRecoveryNotificationEmitted",true);
             });
+            write(context,"stream-promotion-evidence.json",evidence);
             await(10000,()->catalog.requests.get()==2&&"unchanged".equals(app.providers.recoveryStatus().optString("phase")),"Actual account queue refreshed and parsed unchanged synthetic subscription");
             await(10000,()->fixture.acknowledged.get()>=beforeRefreshAcks+3,"Established other-UID stream advances through unchanged catalog refresh");
             assertEquals(FIRST,nativeSelection());assertEquals(1,tunStarts(app));assertFalse(fixture.streamClosed.get());
@@ -149,6 +158,7 @@ public final class StreamPromotionRuntimeTest {
                 context.startService(new Intent(context,AutopilotVpnService.class).setAction(AutopilotVpnService.STOP));
                 await(15000,()->app.engine==null,"Production Stop engine cleanup");assertFalse(app.state().optBoolean("tun"));evidence.put("stopCleanup",true);
             }finally{
+                evidence.put("catalogRequestsAtCleanup",catalog.requests.get()).put("catalogRecoveryAtCleanup",app.providers.recoveryStatus());
                 app.providers=originalProviders;sourceChanged.run();
                 fixture.close();evidence.put("fixtureClosed",true).put("openFixtureSockets",fixture.sockets.size());
                 write(context,"stream-promotion-evidence.json",evidence);write(context,"stream-promotion-fixture.json",fixture.stats());
