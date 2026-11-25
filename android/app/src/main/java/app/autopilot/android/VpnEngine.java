@@ -29,6 +29,8 @@ public final class VpnEngine {
     private final Semaphore nativeDelayPermits=new Semaphore(8);
     private final DiscoveryCoordinator<Node> discovery;
     private final SelectedProviderRecovery selectedProviderRecovery;
+    private final AccountRecoveryTrigger accountRecoveryTrigger=new AccountRecoveryTrigger();
+    private boolean accountRecoveryAlternativesChecked;
     private DiscoveryCoordinator.State discoveryState;
     private String discoveryCode="";
     private final ConnectionWatchdog watchdog=new ConnectionWatchdog(watchdogReachability,this::watchdogResult);
@@ -74,7 +76,7 @@ public final class VpnEngine {
     private File home;
     public VpnEngine(AutopilotVpnService service,AutopilotApp app){this.service=service;this.app=app;
         this.telemetry=new AndroidNetworkTelemetry(app.getSharedPreferences("network-telemetry",android.content.Context.MODE_PRIVATE),app::publishNetworkTelemetry);
-        this.discovery=createDiscovery();this.selectedProviderRecovery=new SelectedProviderRecovery(app::requestRecovery,()->app.log("provider","RECOVERY_QUEUE_FAILED"));}
+        this.discovery=createDiscovery();this.selectedProviderRecovery=new SelectedProviderRecovery(app::requestRecovery,this::requestAccountCatalogRecovery,()->app.log("provider","RECOVERY_QUEUE_FAILED"));}
     public void refreshExitLocation(){telemetry.checkExitNow();}
     private DiscoveryCoordinator<Node> createDiscovery(){
         return new DiscoveryCoordinator<>(new DiscoveryCoordinator.Scheduler(){
@@ -137,7 +139,9 @@ public final class VpnEngine {
                 lastSweep=now();finishChecks();if(complete)requestProviderRecovery();
                 if(current!=null&&!record(current).appRejected){phase="connected";if(currentUsable()){error="";detail=connectedDetail();warnRetainedServicePath();}else detail="Checking the selected connection; discovery continues in the background";}
                 else{phase="degraded";error="NO_HEALTHY_NODE";detail="No verified connection yet. Discovery will resume after a short pause; unverified traffic stays blocked.";scheduleRecovery();}
-                publish();
+                // A completed bounded budget is sufficient evidence to refresh
+                // catalogs; it need not wait for every remaining slow endpoint.
+                updateAccountRecovery(true);publish();
             }
             public void progress(DiscoveryCoordinator.State state){
                 if(!state.code.equals(discoveryCode)){discoveryCode=state.code;app.log("discovery",discoveryCode);}
@@ -197,6 +201,10 @@ public final class VpnEngine {
         running.set(false);Thread thread=activeThread;if(thread!=null)thread.interrupt();
         try{worker.execute(()->{Thread.interrupted();cleanup();});}catch(RejectedExecutionException ignored){cleanup();}
     }
+    boolean providerWorkAllowed(){return running.get()&&!stopping.get();}
+    boolean accountRecoveryJobAllowed(){return providerWorkAllowed()&&nativeReady&&!paused()&&app.settings().optBoolean("autoRefresh");}
+    boolean accountRecoveryAllowed(){return accountRecoveryJobAllowed()&&tunReady&&profileUsable;}
+    long accountRecoveryPendingUntil(){return accountRecoveryTrigger.pendingUntil();}
     public void retest(){requestedRetest.incrementAndGet();forceSweepRequested.set(true);if(!profileUsable||nodes.isEmpty()&&!coreSkipped.isEmpty())nodesChanged();else queueSweep(true);}
     public void select(String name,boolean pin){preemptSweep();submit(()->{
         if(!profileUsable){nodesChanged();return;}
@@ -210,7 +218,7 @@ public final class VpnEngine {
         }finally{finishChecks();publish();}
     });}
     public void resumeAuto(){app.setSettings(safePatch("paused",false));preemptSweep();submit(()->{pinned="";if(!profileUsable||nodes.isEmpty()&&!coreSkipped.isEmpty()){nodesChanged();return;}error="";if(current!=null&&phase.equals("connected"))detail=connectedDetail();queueSweep(false);publish();});}
-    public void pauseAuto(){app.setSettings(safePatch("paused",true));preemptSweep();submit(()->{discovery.cancelled();finishChecks();detail="Auto paused; the current connection remains selected";publish();});}
+    public void pauseAuto(){app.setSettings(safePatch("paused",true));preemptSweep();submit(()->{discovery.cancelled();finishChecks();detail="Auto paused; the current connection remains selected";updateAccountRecovery(false);publish();});}
     private static JSONObject safePatch(String key,Object value){try{return new JSONObject().put(key,value);}catch(JSONException impossible){throw new IllegalArgumentException(impossible);}}
     public void settingsChanged(){preferencesChanged();}
     private long settingLong(String key){return app.settings().optLong(key);}
@@ -220,7 +228,7 @@ public final class VpnEngine {
     public void preferencesChanged(){
         if(!preferencesQueued.compareAndSet(false,true))return;
         preemptSweep();
-        submit(()->{preferencesQueued.set(false);discovery.cancelled();syncHealth();if(reconcileRoutingSettings(installedRules,app.settings(),AndroidRouting.geoAvailable(app),()->nodesChanged(true))){publish();return;}if(!profileUsable){nodesChanged();return;}if(!pinned.isEmpty()||paused()){publish();return;}queueSweep(false);publish();});
+        submit(()->{preferencesQueued.set(false);discovery.cancelled();syncHealth();updateAccountRecovery(false);if(reconcileRoutingSettings(installedRules,app.settings(),AndroidRouting.geoAvailable(app),()->nodesChanged(true))){publish();return;}if(!profileUsable){nodesChanged();return;}if(!pinned.isEmpty()||paused()){publish();return;}queueSweep(false);publish();});
     }
     public void nodesChanged(){nodesChanged(false);}
     private void nodesChanged(boolean forceRouting){
@@ -312,6 +320,7 @@ public final class VpnEngine {
         phase="degraded";
         if(!coreSkipped.isEmpty()){error=CoreDiagnostics.Kind.PROXY_EMPTY.code;detail="The cached nodes are incompatible with the VPN core. See diagnostics. VPN is blocking traffic.";}
         else{error="NO_NODES";detail="No nodes. Sign in to a provider or import a profile.";}
+        requestAccountCatalogRecovery("no-verified-replacement");
     }
     private interface Job{void run()throws Exception;}
     private void submit(Job job){if(!running.get()||stopping.get())return;try{worker.execute(()->guard(job));}catch(RejectedExecutionException ignored){}}
@@ -359,7 +368,7 @@ public final class VpnEngine {
         if(current!=null&&now()-lastVerify>=settingLong("verifyMs")){lastVerify=now();probeServices(current);if(!record(current).qualified(now())){queueSweep(false);warnRetainedServicePath();}}
         if(current==null&&!paused()&&now()>=nextRecovery)queueSweep(false);
         if(now()-lastSweep>=settingLong("sweepMs"))queueSweep(false);
-        publish();
+        updateAccountRecovery(false);publish();
     }
     private void sweep(boolean force)throws Exception{
         sweep(force,0);
@@ -469,6 +478,20 @@ public final class VpnEngine {
     private String connectedDetail(){return (watchdogCode==ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT?"One application path needs attention":"Node connection checks passed")+" · "+(paused()?"Paused":pinned.isEmpty()?"Auto":"Pinned");}
     private boolean currentUsable(){return current!=null&&(record(current).qualified(now())||record(current).retainSelectedTransport(now()));}
     private void warnRetainedServicePath(){if(current!=null&&!record(current).qualified(now())&&record(current).retainSelectedTransport(now())){watchdogCode=ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT;phase="connected";error="SERVICE_PATH_DEGRADED";detail="Internet route remains active; one application service is unavailable. Checking alternatives.";}}
+    private void updateAccountRecovery(boolean alternativesChecked){
+        if(!accountRecoveryAllowed()){accountRecoveryTrigger.observe(paused()?"paused":"stopped",now());accountRecoveryAlternativesChecked=false;return;}
+        boolean serviceIssue=watchdogCode==ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT||"SERVICE_PATH_DEGRADED".equals(error);
+        if(current!=null&&record(current).qualified(now())&&!serviceIssue){accountRecoveryTrigger.observe("healthy",now());accountRecoveryAlternativesChecked=false;return;}
+        accountRecoveryAlternativesChecked|=alternativesChecked;
+        if(!accountRecoveryAlternativesChecked)return;
+        if(current==null)requestAccountCatalogRecovery("no-verified-replacement");
+        else if(record(current).retainSelectedTransport(now())&&serviceIssue)requestAccountCatalogRecovery("persistent-service-degraded");
+    }
+    private void requestAccountCatalogRecovery(String reason){
+        if(!accountRecoveryAllowed())return;
+        String requested=accountRecoveryTrigger.observe("persistent-service-degraded".equals(reason)?"degraded":"no-replacement",now());
+        if(requested!=null){app.log("provider","ACCOUNT_RECOVERY_REQUESTED");app.requestAccountRecovery(requested);}
+    }
     private void resetWatchdogState(ConnectionWatchdog.Code code){watchdogCode=code;watchdogLastCheck=watchdogLastSuccess=0;watchdogFailedOrigins=watchdogConsecutive=0;}
     private void invalidateMonitor(){monitorTarget=null;watchdog.target(null);updateRoute=NO_UPDATE_ROUTE;resetWatchdogState(ConnectionWatchdog.Code.IDLE);}
     private void watchdogResult(ConnectionWatchdog.Observation observation){
@@ -507,9 +530,9 @@ public final class VpnEngine {
                     app.log("health","APPLICATION_PATH_COMPARATIVE_RECOVERY");break;
                 }
             }}finally{inSweep=false;}
-            if(current==prior)watchdogCode=ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT;
+            if(current==prior){watchdogCode=ConnectionWatchdog.Code.SERVICE_PATH_SUSPECT;accountRecoveryAlternativesChecked=true;}
         }
-        warnRetainedServicePath();publish();
+        warnRetainedServicePath();updateAccountRecovery(false);publish();
     }
     private void rejectCurrent()throws Exception{action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name","REJECT").toString(),5000);action("closeAllConnections",null,5000);current=null;pinned="";invalidateMonitor();phase="degraded";error="NO_HEALTHY_NODE";detail="No verified replacement. VPN is blocking unverified traffic.";}
     private void scheduleRecovery(){JSONArray delays=ProductContract.policy().optJSONArray("recoveryBackoffMs");nextRecovery=now()+delays.optLong(Math.min(recoveryAttempt++,delays.length()-1));}

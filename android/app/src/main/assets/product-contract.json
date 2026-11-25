@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "productVersion": "0.5.3",
-  "androidVersionCode": 22,
+  "productVersion": "0.5.4",
+  "androidVersionCode": 23,
   "services": [
     "claude",
     "chatgpt",
@@ -199,7 +199,24 @@
     "updateManifestDeadlineMs": 30000,
     "updateParallelMinBytes": 4194304,
     "updateRetryBaseMs": 200,
-    "discoveryBudgetMs": 60000
+    "discoveryBudgetMs": 60000,
+    "accountRecovery": {
+      "persistentDegradedMs": 60000,
+      "refreshMinGapMs": 300000,
+      "phases": [
+        "idle",
+        "pending",
+        "refreshing",
+        "cooldown",
+        "retesting",
+        "unchanged",
+        "error"
+      ],
+      "reasons": [
+        "persistent-service-degraded",
+        "no-verified-replacement"
+      ]
+    }
   },
   "capabilities": [
     {
@@ -371,6 +388,13 @@
     {
       "id": "tun_routing",
       "platforms": [
+        "android"
+      ]
+    },
+    {
+      "id": "automatic_account_recovery",
+      "platforms": [
+        "windows",
         "android"
       ]
     }

@@ -122,6 +122,18 @@ public final class SelectedProviderRecoveryTest {
         assertTrue(jobs.requests.isEmpty());assertEquals(3,f.http.exports);
     }
 
+    @Test public void confirmedOneVpnFailureQueuesBothCatalogsInsteadOfAnOctohideNameFilter()throws Exception{
+        ProviderRepositoryTest.Fixture f=new ProviderRepositoryTest.Fixture();f.one();f.octo();f.time.advance(301000);
+        Node selected=f.repo.nodes().stream().filter(n->n.provider.equals("onevpn")).findFirst().orElseThrow();
+        ProviderJobs jobs=new ProviderJobs(f.repo);List<String> catalogs=new ArrayList<>();ArrayDeque<Runnable> pending=new ArrayDeque<>();
+        SelectedProviderRecovery recovery=new SelectedProviderRecovery(jobs,reason->{catalogs.add(reason);pending.add(()->f.repo.refreshCatalogsForRecovery(reason,PREFERRED,()->true));},()->fail("Recovery queue must accept work"));
+        ConnectionWatchdog.Observation failed=observe(snapshot(selected,30),6,ConnectionWatchdog.Code.CONFIRMED_FAILED);
+        int one=f.http.oneCalls,octo=f.http.octoCalls,exports=f.http.exports;
+        assertTrue(forward(recovery,failed,selected,false));assertFalse(forward(recovery,failed,selected,false));assertTrue(jobs.requests.isEmpty());
+        assertEquals(List.of("no-verified-replacement"),catalogs);while(!pending.isEmpty())pending.remove().run();
+        assertTrue(f.http.oneCalls>one);assertTrue(f.http.octoCalls>octo);assertEquals(exports,f.http.exports);
+    }
+
     @Test public void queueAndDiagnosticFailuresDoNotEscapeOrRepeatTheSameSelection()throws Exception {
         ProviderRepositoryTest.Fixture f=new ProviderRepositoryTest.Fixture();f.octo();Node selected=node(f.repo,"MY");
         AtomicInteger queues=new AtomicInteger(),diagnostics=new AtomicInteger();AtomicBoolean callerContinued=new AtomicBoolean();

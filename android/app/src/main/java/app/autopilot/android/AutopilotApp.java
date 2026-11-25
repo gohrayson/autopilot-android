@@ -30,6 +30,8 @@ public final class AutopilotApp extends Application {
     private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
     private final AtomicBoolean listenerNotificationQueued=new AtomicBoolean();
     private final ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor();
+    private ProviderWorkQueue providerJobs;
+    private final AtomicBoolean recoverySettlementQueued=new AtomicBoolean();
     @Override public void onCreate() {
         super.onCreate();
         try(InputStream contract=getAssets().open("product-contract.json")){ProductContract.install(contract);}catch(Exception invalid){throw new IllegalStateException("Product contract is unavailable",invalid);}
@@ -47,6 +49,11 @@ public final class AutopilotApp extends Application {
         }catch(Exception invalid){productSettings=ProductSettings.merge(null,new JSONObject());log("settings","SAVED_SETTINGS_REJECTED");}
         try{String saved=prefs.getString("coreDiagnostic","");if(saved.length()<=8192&&!saved.isEmpty())lastCoreDiagnostic=CoreDiagnostics.restore(new JSONObject(saved));}catch(Exception ignored){}
         providers = new ProviderRepository(this);
+        providerJobs=new ProviderWorkQueue(providerExecutor,()->engine,owner->owner instanceof VpnEngine&&((VpnEngine)owner).providerWorkAllowed(),owner->owner instanceof VpnEngine&&((VpnEngine)owner).accountRecoveryJobAllowed(),new ProviderWorkQueue.Work(){
+            public void due(java.util.function.BooleanSupplier active){try{if(active.getAsBoolean())providers.refreshDue(preferred());}catch(Exception failure){log("provider","REFRESH_FAILED");}}
+            public void catalogs(String reason,java.util.function.BooleanSupplier active){providers.refreshCatalogsForRecovery(reason,preferred(),active);}
+            public void failed(List<String> names,java.util.function.BooleanSupplier active){try{if(active.getAsBoolean())providers.refreshFailedNodes(names,preferred());}catch(ProviderException failure){log("provider",failure.code);}}
+        },this::changed,()->log("provider","RECOVERY_QUEUE_FAILED"));
         updates = new UpdateManager(this);
         updates.start();
         providers.onChanged = () -> {
@@ -55,9 +62,7 @@ public final class AutopilotApp extends Application {
             changed();
         };
         ticker.scheduleWithFixedDelay(() -> {
-            if (engine != null && providerBusy.isEmpty()) providerExecutor.execute(() -> {
-                try { providers.refreshDue(preferred()); } catch (Exception ex) { log("provider", "REFRESH_FAILED"); }
-            });
+            if (engine != null && providerBusy.isEmpty()) providerJobs.due();
         }, 30, 30, TimeUnit.SECONDS);
     }
     public List<String> preferred() {
@@ -65,7 +70,7 @@ public final class AutopilotApp extends Application {
     }
     public void setPreferred(List<String> regions) {
         try{setSettings(new JSONObject().put("preferredRegions",new JSONArray(new LinkedHashSet<>(regions))));}catch(JSONException invalid){throw new IllegalArgumentException(invalid);}
-        providerExecutor.execute(() -> { try { providers.refreshDue(preferred()); } catch(Exception ex){log("provider","REFRESH_FAILED");} });
+        if(providerJobs!=null)providerJobs.due();
     }
     public synchronized JSONObject settings(){try{return new JSONObject(productSettings.toString());}catch(JSONException impossible){throw new IllegalStateException(impossible);}}
     public synchronized void setSettings(JSONObject patch){
@@ -81,13 +86,28 @@ public final class AutopilotApp extends Application {
     public boolean vpnWanted(){return prefs.getBoolean("vpnWanted",false);}
     public void setVpnWanted(boolean wanted){prefs.edit().putBoolean("vpnWanted",wanted).apply();}
     public void setBypassPackages(Set<String> packages){try{setSettings(new JSONObject().put("bypassApps",new JSONArray(packages)).put("splitMode",packages.isEmpty()?"off":"bypass"));}catch(JSONException impossible){throw new IllegalArgumentException(impossible);}}
-    public void publish(JSONObject state){snapshot=state;providers.currentNodeName=state.optString("current","");changed();}
-    public void requestRecovery(List<String> names){
-        List<String> copy=new ArrayList<>(names);
-        providerExecutor.execute(()->{try{providers.refreshFailedNodes(copy,preferred());}catch(ProviderException ex){log("provider",ex.code);}});
+    public void publish(JSONObject state){
+        snapshot=state;providers.currentNodeName=state.optString("current","");changed();
+        VpnEngine owner=engine;
+        if(owner!=null&&recoverySettlementQueued.compareAndSet(false,true))providerExecutor.execute(()->{
+            try{
+                if(engine!=owner||!owner.providerWorkAllowed())return;
+                JSONObject current=snapshot;String name=current.optString("current");JSONArray rows=current.optJSONArray("nodes");
+                if(rows!=null&&!name.isEmpty())for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&name.equals(row.optString("name"))&&row.optBoolean("qualified"))providers.recoveryQualified(row.optString("provider"),name,row.optLong("applicationCheckedAt"));}
+            }finally{recoverySettlementQueued.set(false);}
+        });
     }
+    public void requestRecovery(List<String> names){
+        if(providerJobs!=null)providerJobs.failed(names);
+    }
+    public void requestAccountRecovery(String reason){if(providerJobs!=null)providerJobs.catalogs(reason);}
     public void publishNetworkTelemetry(JSONObject telemetry){networkTelemetry=telemetry;changed();}
-    public JSONObject state(){try{return new JSONObject(snapshot.toString()).put("network",new JSONObject(networkTelemetry.toString()));}catch(JSONException impossible){throw new IllegalStateException(impossible);}}
+    public JSONObject state(){try{
+        JSONObject result=new JSONObject(snapshot.toString());VpnEngine owner=engine;boolean active=owner!=null&&owner.providerWorkAllowed()&&!settings().optBoolean("paused")&&settings().optBoolean("autoRefresh");
+        boolean healthy=false;String selected=result.optString("current");JSONObject watchdog=result.optJSONObject("watchdog");String code=watchdog==null?"":watchdog.optString("code");JSONArray rows=result.optJSONArray("nodes");
+        if("connected".equals(result.optString("phase"))&&Set.of("HEALTHY","IDLE","CHECKING").contains(code)&&rows!=null&&!selected.isEmpty())for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&selected.equals(row.optString("name"))&&row.optBoolean("qualified"))healthy=true;}
+        return result.put("network",new JSONObject(networkTelemetry.toString())).put("accountRecovery",AccountRecoveryStatus.lifecycle(providers==null?null:providers.recoveryStatus(),active,healthy,owner==null?0:owner.accountRecoveryPendingUntil(),System.currentTimeMillis()));
+    }catch(JSONException impossible){throw new IllegalStateException(impossible);}}
     /** Persisted failures are history until a current run reports another rejection. */
     public JSONObject coreDiagnostic(){JSONObject saved=currentCoreDiagnostic;return saved==null?null:CoreDiagnostics.restore(saved);}
     public JSONObject historicalCoreDiagnostic(){JSONObject saved=lastCoreDiagnostic;return saved==null?null:CoreDiagnostics.restore(saved);}
@@ -144,6 +164,9 @@ public final class AutopilotApp extends Application {
         JSONObject network=s.optJSONObject("networkSignals");if(network!=null)out.append("Native network observations (session only, not per-node): ").append(network).append("\n");
         JSONObject watchdog=s.optJSONObject("watchdog");if(watchdog!=null)out.append("Active HTTPS watchdog: ").append(watchdog).append("\n");
         JSONObject discovery=s.optJSONObject("discovery");if(discovery!=null)out.append("Node discovery: ").append(discovery).append("\n");
+        JSONObject recovery=s.optJSONObject("accountRecovery");if(recovery!=null)out.append("Account node recovery: ").append(recovery).append("\n")
+            .append("Provider API path: direct HTTPS on excluded Autopilot UID; a working VPN node does not prove account API reachability\n");
+        if(recovery!=null&&"idle".equals(recovery.optString("phase")))out.append("Last account recovery result (historical): ").append(AccountRecoveryStatus.safe(providers.recoveryStatus())).append("\n");
         JSONObject telemetry=s.optJSONObject("network");if(telemetry!=null){JSONObject exit=telemetry.optJSONObject("exit"),traffic=telemetry.optJSONObject("traffic");
             out.append("Exit measurement: ").append(exit==null?"STOPPED":exit.optString("code","STOPPED")).append("\n")
                 .append("VPN traffic counters: ").append(traffic==null?"STOPPED":traffic.optString("code","STOPPED")).append("\n")

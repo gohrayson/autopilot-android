@@ -222,5 +222,147 @@
       "elapsedMs": 4000,
       "expected": false
     }
+  ],
+  "accountRecoveryCases": [
+    {
+      "id": "persistent-degradation-refreshes-once-per-recovery-window",
+      "steps": [
+        {
+          "offsetMs": 0,
+          "signal": "degraded",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 59999,
+          "signal": "degraded",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 60000,
+          "signal": "degraded",
+          "expectedBatches": 1
+        },
+        {
+          "offsetMs": 60001,
+          "signal": "degraded",
+          "expectedBatches": 1
+        },
+        {
+          "offsetMs": 359999,
+          "signal": "degraded",
+          "expectedBatches": 1
+        },
+        {
+          "offsetMs": 360000,
+          "signal": "degraded",
+          "expectedBatches": 2
+        }
+      ]
+    },
+    {
+      "id": "healthy-observation-resets-persistence-but-not-attempt-spacing",
+      "steps": [
+        {
+          "offsetMs": 0,
+          "signal": "degraded",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 30000,
+          "signal": "healthy",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 90000,
+          "signal": "degraded",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 150000,
+          "signal": "degraded",
+          "expectedBatches": 1
+        }
+      ]
+    },
+    {
+      "id": "pause-restarts-degradation-confirmation",
+      "steps": [
+        {
+          "offsetMs": 0,
+          "signal": "degraded",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 59000,
+          "signal": "paused",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 60000,
+          "signal": "degraded",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 120000,
+          "signal": "degraded",
+          "expectedBatches": 1
+        }
+      ]
+    },
+    {
+      "id": "stop-restarts-degradation-confirmation",
+      "steps": [
+        {
+          "offsetMs": 0,
+          "signal": "degraded",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 59000,
+          "signal": "stopped",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 120000,
+          "signal": "degraded",
+          "expectedBatches": 0
+        },
+        {
+          "offsetMs": 180000,
+          "signal": "degraded",
+          "expectedBatches": 1
+        }
+      ]
+    },
+    {
+      "id": "confirmed-no-replacement-refreshes-immediately-with-spacing",
+      "steps": [
+        {
+          "offsetMs": 0,
+          "signal": "no-replacement",
+          "expectedBatches": 1
+        },
+        {
+          "offsetMs": 1000,
+          "signal": "healthy",
+          "expectedBatches": 1
+        },
+        {
+          "offsetMs": 2000,
+          "signal": "no-replacement",
+          "expectedBatches": 1
+        },
+        {
+          "offsetMs": 299999,
+          "signal": "no-replacement",
+          "expectedBatches": 1
+        },
+        {
+          "offsetMs": 300000,
+          "signal": "no-replacement",
+          "expectedBatches": 2
+        }
+      ]
+    }
   ]
 }

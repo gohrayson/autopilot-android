@@ -18,6 +18,7 @@ public final class ProductContract {
         while((count=input.read(block))!=-1){if(bytes.size()+count>65536)throw new IOException("PRODUCT_CONTRACT_SIZE");bytes.write(block,0,count);}
         JSONObject value=new JSONObject(bytes.toString(StandardCharsets.UTF_8.name()));
         if(value.optInt("schemaVersion")!=1||value.optJSONObject("settings")==null||value.optJSONObject("policy")==null||value.optJSONArray("services")==null)throw new IOException("PRODUCT_CONTRACT_INVALID");
+        try{new AccountRecoveryPolicy(value.getJSONObject("policy").optJSONObject("accountRecovery"));}catch(IllegalStateException invalid){throw new IOException("PRODUCT_CONTRACT_INVALID",invalid);}
         return value;
     }
     public static synchronized void install(InputStream input)throws IOException,JSONException{try(InputStream owned=input){installed=read(owned);}}

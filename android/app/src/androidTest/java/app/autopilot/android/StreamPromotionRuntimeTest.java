@@ -17,23 +17,31 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import static org.junit.Assert.*;
 
 /** Hosted emulator only: real discovery/selector/TUN and a continuous separate-UID stream. */
 @RunWith(AndroidJUnit4.class)
 public final class StreamPromotionRuntimeTest {
     private static final String FIRST="Autopilot Stream Japan 00 First",SECOND="Autopilot Stream Japan 01 Second";
+    private static final String RENEWED="Autopilot Recovery Japan Fresh Catalog";
     private static final String READY="stream-promotion-ready.json",COMPLETE="stream-promotion-complete";
-    @Test(timeout=240000) public void expiredRankingPromotionPreservesOldSocketAndConfirmedFailureClosesIt()throws Exception {
+    @Test(timeout=300000) public void expiredRankingPromotionPreservesOldSocketAndConfirmedFailureClosesIt()throws Exception {
         Assume.assumeTrue("Require explicit hosted public TLS opt-in","true".equals(InstrumentationRegistry.getArguments().getString("hostedAllowPublicTransport")));
         Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();AutopilotApp app=(AutopilotApp)context.getApplicationContext();
         assertNull(app.engine);assertTrue(app.providers.nodes().isEmpty());assertNull(VpnService.prepare(context));
         assertEquals(ProductSettings.merge(null,new JSONObject()).toString(),app.settings().toString());
         for(String name:List.of(READY,READY+".tmp",COMPLETE,COMPLETE+".tmp","stream-promotion-evidence.json"))Files.deleteIfExists(new File(context.getFilesDir(),name).toPath());
         JSONObject evidence=new JSONObject();Fixture fixture=new Fixture();
+        ProviderRepository originalProviders=app.providers;Runnable sourceChanged=originalProviders.onChanged;
+        AtomicLong accountClock=new AtomicLong(System.currentTimeMillis());
+        JSONArray initialOutbounds=new JSONArray().put(outbound(FIRST,"first",fixture.port())).put(outbound(SECOND,"second",fixture.port()));
+        CatalogFixture catalog=new CatalogFixture(initialOutbounds,accountClock);
         try{
             app.setSettings(new JSONObject().put("required",new JSONArray().put("chatgpt")));
-            app.providers.importConfig(new JSONObject().put("proxies",new JSONArray().put(outbound(FIRST,"first",fixture.port())).put(outbound(SECOND,"second",fixture.port()))).toString());
+            app.providers=catalog.repository;app.providers.onChanged=sourceChanged;sourceChanged.run();
             context.startForegroundService(new Intent(context,AutopilotVpnService.class).setAction(AutopilotVpnService.START));
             await(60000,()->FIRST.equals(app.state().optString("current"))&&app.state().optBoolean("tun"),"Initial production discovery selection");
             assertEquals(FIRST,nativeSelection());assertEquals(1,tunStarts(app));
@@ -41,6 +49,29 @@ public final class StreamPromotionRuntimeTest {
             String nonce=UUID.randomUUID().toString();write(context,READY,new JSONObject().put("uid",android.os.Process.myUid()).put("tun",true).put("marker",fixture.marker).put("nonce",nonce));
             await(35000,()->fixture.acknowledged.get()>=3,"Separate-UID established stream acknowledgements");
             VpnEngine engine=app.engine;assertNotNull(engine);
+            int beforeRefreshAcks=fixture.acknowledged.get();
+            // Controlled selected-service evidence and elapsed incident time on the
+            // real controller. Production policy durations remain unmodified and
+            // execute independently against the shared JVM scenario set.
+            onWorker(engine,()->{
+                Node selected=(Node)field(engine,"current");
+                @SuppressWarnings("unchecked") Map<String,SelectionPolicy.Health> ledger=(Map<String,SelectionPolicy.Health>)field(engine,"health");
+                ledger.get(selected.id).chatgpt="error";
+                Field checked=VpnEngine.class.getDeclaredField("accountRecoveryAlternativesChecked");checked.setAccessible(true);checked.setBoolean(engine,true);
+                invoke(engine,"warnRetainedServicePath");invokeRecoveryObservation(engine);
+                AccountRecoveryTrigger trigger=(AccountRecoveryTrigger)field(engine,"accountRecoveryTrigger");
+                Field since=AccountRecoveryTrigger.class.getDeclaredField("degradedAt");since.setAccessible(true);since.setLong(trigger,System.currentTimeMillis()-new AccountRecoveryPolicy().persistentDegradedMs);
+                invokeRecoveryObservation(engine);
+            });
+            await(10000,()->catalog.requests.get()==2&&"unchanged".equals(app.providers.recoveryStatus().optString("phase")),"Actual account queue refreshed and parsed unchanged synthetic subscription");
+            await(10000,()->fixture.acknowledged.get()>=beforeRefreshAcks+3,"Established other-UID stream advances through unchanged catalog refresh");
+            assertEquals(FIRST,nativeSelection());assertEquals(1,tunStarts(app));assertFalse(fixture.streamClosed.get());
+            evidence.put("accountRecoveryEngineSignal",true).put("accountCatalogRequested",true).put("unchangedCatalogNoTunRestart",true).put("unchangedCatalogPreservedStream",true)
+                .put("recoveryTimingFixture","controller evidence and elapsed incident clock; production durations unchanged").put("unchangedCatalogHttpRequests",catalog.requests.get());
+            onWorker(engine,()->{
+                Node selected=(Node)field(engine,"current");@SuppressWarnings("unchecked") Map<String,SelectionPolicy.Health> ledger=(Map<String,SelectionPolicy.Health>)field(engine,"health");
+                ledger.get(selected.id).chatgpt="ok";invokeRecoveryObservation(engine);
+            });
             // A deterministic clock-expiry fixture, confined to the actual controller lane.
             // Cancel only obsolete discovery completions, age the selected ledger, and leave
             // the real selector, TUN, established sockets and policy durations untouched.
@@ -97,20 +128,65 @@ public final class StreamPromotionRuntimeTest {
             assertTrue(fixture.tlsHosts.containsAll(Fixture.HOSTS));assertTrue(fixture.tlsSent.get()>0&&fixture.tlsReceived.get()>0);
             assertEquals(0,fixture.denied.get());assertNull(fixture.failure.get());
             evidence.put("separateUid",true).put("platformTls",true).put("threeWatchdogOrigins",true);
+            // With the deliberately failed old stream already closed, publish a
+            // different valid catalog. Android's current guarded profile install
+            // pauses/re-attaches TUN; do not claim stream continuity through it.
+            assertEquals(1,tunStarts(app));evidence.put("tunStartsBeforeCatalogChange",1);
+            catalog.outbounds.set(new JSONArray().put(outbound(RENEWED,"first",fixture.port())));catalog.clock.addAndGet(new AccountRecoveryPolicy().refreshMinGapMs+1000);fixture.firstEnabled.set(true);
+            onWorker(engine,()->{
+                AccountRecoveryTrigger trigger=(AccountRecoveryTrigger)field(engine,"accountRecoveryTrigger");Field deadline=AccountRecoveryTrigger.class.getDeclaredField("nextSignalAt");deadline.setAccessible(true);deadline.setLong(trigger,0);
+                Method request=VpnEngine.class.getDeclaredMethod("requestAccountCatalogRecovery",String.class);request.setAccessible(true);request.invoke(engine,"no-verified-replacement");
+            });
+            await(15000,()->catalog.requests.get()==4&&app.providers.nodes().size()==1,"Changed valid synthetic account catalog committed");
+            await(60000,()->RENEWED.equals(app.state().optString("current"))&&app.state().optBoolean("tun"),"Changed account node freshly qualified by production discovery");
+            assertEquals(RENEWED,nativeSelection());assertEquals(2,tunStarts(app));
+            JSONArray qualifiedRows=app.state().getJSONArray("nodes");assertEquals(1,qualifiedRows.length());assertEquals(RENEWED,qualifiedRows.getJSONObject(0).getString("name"));assertTrue(qualifiedRows.getJSONObject(0).getBoolean("qualified"));
+            assertEquals("retesting",app.providers.recoveryStatus().getString("phase"));
+            evidence.put("changedCatalogCommitted",true).put("changedCatalogFreshlyQualified",true).put("changedCatalogGuardedProfileTransition",true).put("tunStartsAfterCatalogChange",2).put("tunStarts",2)
+                .put("catalogHttpRequests",catalog.requests.get()).put("providerApi","memory-only synthetic OneVPN HTTP boundary; no vendor requests");
         }finally{
             try{
                 context.startService(new Intent(context,AutopilotVpnService.class).setAction(AutopilotVpnService.STOP));
                 await(15000,()->app.engine==null,"Production Stop engine cleanup");assertFalse(app.state().optBoolean("tun"));evidence.put("stopCleanup",true);
             }finally{
+                app.providers=originalProviders;sourceChanged.run();
                 fixture.close();evidence.put("fixtureClosed",true).put("openFixtureSockets",fixture.sockets.size());
                 write(context,"stream-promotion-evidence.json",evidence);write(context,"stream-promotion-fixture.json",fixture.stats());
                 for(String name:List.of(READY,READY+".tmp",COMPLETE,COMPLETE+".tmp"))Files.deleteIfExists(new File(context.getFilesDir(),name).toPath());
             }
         }
-        String receipt="AUTOPILOT_STREAM_PROMOTION_RUNTIME_ACCEPTED automaticDiscovery=true staleOldProof=true sameOldSocket=true newSocketNewOutbound=true confirmedRecoveryCloses=true separateUid=true tunStarts=1 platformTls=true stopCleanup=true fixtureCleanup=true";
+        String receipt="AUTOPILOT_STREAM_PROMOTION_RUNTIME_ACCEPTED automaticDiscovery=true staleOldProof=true sameOldSocket=true newSocketNewOutbound=true confirmedRecoveryCloses=true separateUid=true accountRecovery=true unchangedCatalogPreservesStream=true changedCatalogQualified=true tunStartsBeforeCatalogChange=1 tunStartsAfterCatalogChange=2 platformTls=true stopCleanup=true fixtureCleanup=true";
         System.out.println(receipt);Bundle status=new Bundle();status.putString("stream",receipt+"\n");InstrumentationRegistry.getInstrumentation().sendStatus(2,status);
     }
     private static JSONObject outbound(String name,String user,int port)throws Exception{return new JSONObject().put("name",name).put("type","socks5").put("server","127.0.0.1").put("port",port).put("username",user).put("password","synthetic-stream-only");}
+    private static void invokeRecoveryObservation(VpnEngine engine)throws Exception{Method method=VpnEngine.class.getDeclaredMethod("updateAccountRecovery",boolean.class);method.setAccessible(true);method.invoke(engine,false);}
+
+    /** Owned memory-only account/API fixture. No credential file or vendor API is used. */
+    private static final class CatalogFixture {
+        final AtomicReference<JSONArray> outbounds;final AtomicLong clock;final AtomicInteger requests=new AtomicInteger();final ProviderRepository repository;
+        CatalogFixture(JSONArray initial,AtomicLong clock)throws Exception{
+            this.outbounds=new AtomicReference<>(initial);this.clock=clock;Map<String,JSONObject> records=new HashMap<>();JSONArray nodes=new JSONArray();
+            for(int i=0;i<initial.length();i++)nodes.put(new JSONObject().put("config",initial.getJSONObject(i)).put("country","JP"));
+            records.put("onevpn",new JSONObject().put("version",1).put("session",new JSONObject().put("accessToken","synthetic-access").put("refreshToken","synthetic-refresh").put("deviceId","synthetic-device").put("expiresAt",clock.get()+3600000))
+                .put("account",new JSONObject().put("username","fixture@example.invalid").put("paid",true).put("subscriptionEnd",clock.get()+86400000)).put("nodes",nodes).put("lastRefresh",0).put("nextRefreshAt",clock.get()+900000));
+            SecureStore store=new SecureStore(){
+                @Override public JSONObject load(String provider)throws ProviderException{try{return records.containsKey(provider)?new JSONObject(records.get(provider).toString()):null;}catch(JSONException invalid){throw new ProviderException("CREDENTIAL_STORE","restore");}}
+                @Override public void save(String provider,JSONObject value)throws ProviderException{try{if(value==null)records.remove(provider);else records.put(provider,new JSONObject(value.toString()));}catch(JSONException invalid){throw new ProviderException("CREDENTIAL_STORE","session-save");}}
+            };
+            ProviderHttp http=new ProviderHttp(){
+                @Override public JSONObject one(String path,JSONObject body,String token,String stage)throws ProviderException{
+                    requests.incrementAndGet();try{
+                        if(path.equals("/api/user/client-info"))return new JSONObject().put("status","success").put("user",new JSONObject().put("email","fixture@example.invalid").put("isBanned",false).put("expireTime",clock.get()+86400000));
+                        if(!path.equals("/api/user/subscription/encrypted"))throw new Exception("Unexpected fixture request");
+                        byte[] iv=new byte[16];Cipher cipher=Cipher.getInstance("AES/CBC/PKCS5Padding");cipher.init(Cipher.ENCRYPT_MODE,new SecretKeySpec("x9Kp2mNv7QwTr4Yb8FjHs6DcAeLg0UiZ".getBytes(StandardCharsets.UTF_8),"AES"),new IvParameterSpec(iv));
+                        return new JSONObject().put("iv",Base64.getEncoder().encodeToString(iv)).put("data",Base64.getEncoder().encodeToString(cipher.doFinal(new JSONObject().put("proxies",outbounds.get()).toString().getBytes(StandardCharsets.UTF_8))));
+                    }catch(Exception invalid){throw new ProviderException("INVALID_RESPONSE",stage);}
+                }
+                @Override public JSONObject octo(Map<String,String> fields,String stage){throw new AssertionError("Unsigned Octohide fixture must never contact a provider");}
+            };
+            repository=new ProviderRepository(store,http,clock::get,millis->clock.addAndGet(millis));
+        }
+    }
     private interface Checked {boolean get()throws Exception;}
     private interface Job {void run()throws Exception;}
     private static void await(long millis,Checked condition,String purpose)throws Exception{long until=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(millis);while(System.nanoTime()<until){if(condition.get())return;Thread.sleep(50);}fail(purpose+" timed out");}

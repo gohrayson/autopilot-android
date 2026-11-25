@@ -146,6 +146,8 @@ public final class MainActivity extends Activity {
         });
         detail.setText(s.optString("detail",running?"Checking your connection…":"Automatic switching stays active unless you pin a node."));
         String healthMessage=connectionHealthMessage(watchdog,System.currentTimeMillis());
+        String recoveryMessage=AccountRecoveryStatus.message(s.optJSONObject("accountRecovery"));
+        if(!recoveryMessage.isEmpty())healthMessage=healthMessage.isEmpty()?recoveryMessage:healthMessage+"\n"+recoveryMessage;
         connectionHealth.setText(healthMessage);connectionHealth.setVisibility(healthMessage.isEmpty()?View.GONE:View.VISIBLE);
         error.setText(errorMessage(s.optString("error","")));error.setVisibility(error.getText().length()==0?View.GONE:View.VISIBLE);
         connect.setText(running?"Stop VPN":"Start VPN");connect.setEnabled(running||!app.providers.nodes().isEmpty());

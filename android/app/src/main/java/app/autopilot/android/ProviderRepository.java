@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 
 /**
  * Single provider-executor writer. UI readers see immutable published snapshots,
@@ -38,6 +39,7 @@ public final class ProviderRepository {
     private volatile List<Node> publishedNodes = Collections.emptyList();
     private volatile Map<String, String> publishedStatus = Collections.emptyMap();
     private volatile Map<String, String> publishedOrigins = Collections.emptyMap();
+    private volatile String publishedRecovery = "{}";
     public volatile Runnable onChanged;
     /** Published by App with each VPN snapshot; provider work never calls back into the engine. */
     public volatile String currentNodeName = "";
@@ -50,6 +52,8 @@ public final class ProviderRepository {
         final Set<Integer> failedRegions = new HashSet<>();
         final Map<Integer, Long> exportAttempts = new HashMap<>();
         long retryAt, nextRefreshAt, lastRefresh, metadataAt, lastExportAt, ttl = DEFAULT_TTL;
+        long recoveryLastAt, recoveryNextAt;
+        String recoveryPhase="idle", recoveryReason;
         String phase = "logged-out", code, error, retryCode;
         State(String provider) { this.provider = provider; }
     }
@@ -79,6 +83,50 @@ public final class ProviderRepository {
     public JSONObject status(String provider) {
         try { return new JSONObject(publishedStatus.getOrDefault(provider, "{}")); }
         catch (Exception ignored) { return new JSONObject(); }
+    }
+
+    public JSONObject recoveryStatus(){try{return new JSONObject(publishedRecovery);}catch(Exception invalid){throw new IllegalStateException("ACCOUNT_RECOVERY_STATUS_INVALID",invalid);}}
+
+    /** Health incidents refresh both authenticated catalogs independently. Catalog
+     * recovery never force-renews healthy Octohide leases; proven failed exports
+     * retain their separate targeted scheduler. The deadline is durable before HTTP. */
+    public void refreshCatalogsForRecovery(String reason,List<String> preferred,BooleanSupplier active){
+        AccountRecoveryPolicy policy=new AccountRecoveryPolicy();policy.reason(reason);
+        for(State state:Arrays.asList(one,octo)){
+            if(!active.getAsBoolean())break;
+            if(state.session==null&&state.pendingSession==null||state==octo&&(state.session==null||state.session.optString("sid").isEmpty())){state.recoveryPhase="idle";continue;}
+            state.recoveryReason=reason;
+            try{
+                retryWrite(state,false);
+                PendingWrite pending=pendingWrites.get(state.provider);
+                long eligible=Math.max(state.recoveryNextAt,Math.max(state.retryAt,state.lastRefresh+policy.refreshMinGapMs));
+                if(state==octo)eligible=Math.max(eligible,state.nextRefreshAt);
+                if(pending!=null)eligible=Math.max(eligible,pending.retryAt);
+                if(pending!=null||eligible>clock.now()){
+                    state.recoveryPhase="cooldown";publish();continue;
+                }
+                if(!active.getAsBoolean())break;
+                String before=nodeIdentity(state.nodes);
+                state.recoveryLastAt=clock.now();state.recoveryNextAt=clock.now()+policy.refreshMinGapMs;
+                state.recoveryPhase="pending";save(state);publish();
+                if(!active.getAsBoolean()){state.recoveryPhase="cooldown";publish();break;}
+                state.recoveryPhase="refreshing";publish();
+                if(state==one)refreshOne(false);else refreshOcto(preferred,null,true);
+                state.recoveryPhase=before.equals(nodeIdentity(state.nodes))?"unchanged":"retesting";
+            }catch(ProviderException failure){state.recoveryPhase="error";if(!failure.code.equals(state.code)){failState(state,failure,"refresh");try{persistFailure(state,failure);}catch(ProviderException storage){/* Existing pending-write barrier retains the cooldown. */}}}
+            catch(RuntimeException failure){state.recoveryPhase="error";ProviderException safe=new ProviderException("INVALID_RESPONSE","refresh");failState(state,safe,"refresh");try{persistFailure(state,safe);}catch(ProviderException storage){/* Existing pending-write barrier retains the cooldown. */}}
+            publish();
+        }
+        publish();
+    }
+    private static String nodeIdentity(List<Node> nodes){return String.join(",",nodes.stream().map(node->node.id).sorted().collect(java.util.stream.Collectors.toList()));}
+
+    /** A selected node's later real HTTPS proof completes the visible retest phase. */
+    void recoveryQualified(String provider,String name,long verifiedAt){
+        State state="onevpn".equals(provider)?one:"octohide".equals(provider)?octo:null;
+        if(state==null||!"retesting".equals(state.recoveryPhase)||verifiedAt<state.recoveryLastAt||!name.equals(currentNodeName))return;
+        if(state.nodes.stream().noneMatch(node->node.name.equals(name)))return;
+        state.recoveryPhase="idle";publish();
     }
 
     public void login(String provider, String email, String password, List<String> preferred) throws ProviderException {
@@ -175,6 +223,7 @@ public final class ProviderRepository {
 
     public void logout(String provider) throws ProviderException {
         State state = state(provider);
+        state.recoveryPhase="idle";
         state.session = null; state.pendingSession = null; state.account = null;
         state.nodes = new ArrayList<>(); state.exports = new JSONArray(); state.regions = new JSONArray();
         state.failedRegions.clear(); state.exportAttempts.clear();
@@ -224,6 +273,7 @@ public final class ProviderRepository {
             JSONObject subscription = http.one("/api/user/subscription/encrypted", null, session.getString("accessToken"), "subscription");
             List<Node> nodes = NodeParser.decryptOneVpn(subscription);
             State committed = new State("onevpn"); committed.session = cloneJson(session); committed.account = account; committed.nodes = nodes;
+            committed.recoveryLastAt=state.recoveryLastAt;committed.recoveryNextAt=state.recoveryNextAt;committed.recoveryReason=state.recoveryReason;
             committed.lastRefresh = clock.now(); committed.nextRefreshAt = oneNextRefresh(session); committed.phase = "ready";
             committed.diagnostic = success("onevpn", fromLogin ? "login" : "refresh");
             save(committed); // Source takeover only after account, non-empty subscription and secure commit all succeed.
@@ -288,6 +338,9 @@ public final class ProviderRepository {
     private static boolean terminalOne(ProviderException error) { return Arrays.asList("AUTH_REQUIRED", "SESSION_EXPIRED", "ACCOUNT_EXPIRED").contains(error.code); }
 
     private void refreshOcto(List<String> preferred, OctoClient existing) throws ProviderException {
+        refreshOcto(preferred,existing,false);
+    }
+    private void refreshOcto(List<String> preferred, OctoClient existing,boolean catalogOnly) throws ProviderException {
         State state = octo;
         if (pendingWrites.containsKey(state.provider)) return;
         if (state.retryAt > clock.now() || state.nextRefreshAt > clock.now() || state.session == null) return;
@@ -313,7 +366,7 @@ public final class ProviderRepository {
                 state.metadataAt = clock.now();
                 state.session = cloneJson(client.session); save(state); publish();
             }
-            List<JSONObject> todo = exportCandidates(state, preferred, clock.now());
+            List<JSONObject> todo = catalogOnly ? Collections.emptyList() : exportCandidates(state, preferred, clock.now());
             int attempts = 0;
             for (JSONObject region : todo) {
                 if (++attempts > 3) break;
@@ -533,6 +586,7 @@ public final class ProviderRepository {
                 "account", state.account, "nodes", nodes, "regions", state.regions, "exports", state.exports,
                 "retryAt", state.retryAt, "retryCode", state.retryCode, "nextRefreshAt", state.nextRefreshAt,
                 "lastRefresh", state.lastRefresh, "metadataAt", state.metadataAt, "lastExportAt", state.lastExportAt,
+                "accountRecovery", object("lastAttemptAt",state.recoveryLastAt,"nextAttemptAt",state.recoveryNextAt,"reason",state.recoveryReason),
                 "ttl", state.ttl, "lastDiagnostic", state.diagnostic, "failedRegions", failed, "exportAttempts", attempts);
         try { store.save(state.provider, data); pendingWrites.remove(state.provider); }
         catch (ProviderException error) {
@@ -550,6 +604,14 @@ public final class ProviderRepository {
         state.lastRefresh = Math.min(Math.max(0, data.optLong("lastRefresh")), clock.now());
         state.metadataAt = Math.min(Math.max(0, data.optLong("metadataAt")), clock.now());
         state.lastExportAt = Math.min(Math.max(0, data.optLong("lastExportAt")), clock.now());
+        JSONObject recovery=data.optJSONObject("accountRecovery");
+        if(recovery!=null){
+            AccountRecoveryPolicy policy=new AccountRecoveryPolicy();
+            state.recoveryLastAt=Math.min(integer(recovery.opt("lastAttemptAt"),0,Long.MAX_VALUE),clock.now());
+            state.recoveryNextAt=Math.min(integer(recovery.opt("nextAttemptAt"),0,Long.MAX_VALUE),clock.now()+policy.refreshMinGapMs);
+            if(!recovery.isNull("reason")){String reason=requiredText(recovery.opt("reason"),64);policy.reason(reason);state.recoveryReason=reason;}
+            state.recoveryPhase=state.recoveryNextAt>clock.now()?"cooldown":"idle";
+        }
         state.ttl = Math.max(1000, Math.min(DEFAULT_TTL, data.optLong("ttl", DEFAULT_TTL)));
         state.session = data.optJSONObject("session"); state.pendingSession = data.optJSONObject("pendingSession"); state.account = data.optJSONObject("account");
         if (state == one) {
@@ -625,8 +687,30 @@ public final class ProviderRepository {
             statuses.put(state.provider, status.toString());
         }
         publishedNodes = Collections.unmodifiableList(nodes); publishedStatus = Collections.unmodifiableMap(statuses); publishedOrigins = Collections.unmodifiableMap(origins);
+        publishedRecovery=AccountRecoveryStatus.validate(recoverySnapshot()).toString();
         Runnable listener = onChanged;
         if (listener != null) try { listener.run(); } catch (Exception ignored) { }
+    }
+
+    private JSONObject recoverySnapshot(){
+        JSONArray providers=new JSONArray();String phase="idle",reason=null;long last=0,next=0;
+        List<String> priority=List.of("idle","cooldown","unchanged","retesting","error","pending","refreshing");
+        AccountRecoveryPolicy policy=new AccountRecoveryPolicy();
+        for(State state:Arrays.asList(one,octo)){
+            String itemPhase=state.recoveryPhase;
+            if(state.session==null&&state.pendingSession==null&&!"error".equals(itemPhase))itemPhase="idle";
+            if(!policy.phases.contains(itemPhase))throw new IllegalStateException("ACCOUNT_RECOVERY_PHASE_INVALID");
+            long eligible=Math.max(state.recoveryNextAt,state.retryAt);
+            if(state==octo)eligible=Math.max(eligible,state.nextRefreshAt);
+            if("cooldown".equals(itemPhase))eligible=Math.max(eligible,state.lastRefresh+policy.refreshMinGapMs);
+            PendingWrite pending=pendingWrites.get(state.provider);if(pending!=null)eligible=Math.max(eligible,pending.retryAt);
+            if(priority.indexOf(itemPhase)>priority.indexOf(phase))phase=itemPhase;
+            if(state.recoveryLastAt>=last&&state.recoveryReason!=null){last=state.recoveryLastAt;reason=state.recoveryReason;}
+            if(!"idle".equals(itemPhase)&&eligible>clock.now()&&(next==0||eligible<next))next=eligible;
+            providers.put(object("id",state.provider,"phase",itemPhase,"lastAttemptAt",state.recoveryLastAt==0?null:state.recoveryLastAt,
+                "nextAttemptAt",!"idle".equals(itemPhase)&&eligible>clock.now()?eligible:null));
+        }
+        return object("phase",phase,"reason",reason,"lastAttemptAt",last==0?null:last,"nextAttemptAt",next==0?null:next,"providers",providers);
     }
 
     static JSONObject object(Object... pairs) {
