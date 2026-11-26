@@ -28,12 +28,18 @@ public class EngineConfigurationTest {
         assertEquals("[\"REJECT\"]",names.toString());assertFalse(config.has("external-controller"));
         assertFalse(config.has("geo-auto-update"));
     }
-    @Test public void encryptedDnsCanBootstrapBeforeAnyNodeIsSelected()throws Exception{
+    @Test public void resilientDnsCanBootstrapBeforeAnyNodeIsSelected()throws Exception{
         JSONObject dns=VpnEngine.configuration(List.of(),new HashMap<>()).getJSONObject("dns");
         assertTrue(dns.getBoolean("enable"));assertEquals("fake-ip",dns.getString("enhanced-mode"));
         for(String key:List.of("nameserver","proxy-server-nameserver")){
-            JSONArray resolvers=dns.getJSONArray(key);assertTrue(resolvers.length()>0);
-            for(int i=0;i<resolvers.length();i++){String resolver=resolvers.getString(i);assertTrue(resolver.startsWith("https://"));assertFalse(resolver.contains("#AUTOPILOT"));}
+            JSONArray resolvers=dns.getJSONArray(key);boolean literal=false,encrypted=false;assertEquals(CoreDnsConfig.DEFAULT_RESOLVERS.size(),resolvers.length());
+            for(int i=0;i<resolvers.length();i++){
+                String resolver=resolvers.getString(i);assertEquals(CoreDnsConfig.DEFAULT_RESOLVERS.get(i),resolver);assertFalse(resolver.contains("#"));
+                if(resolver.matches("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"))literal=true;
+                else{assertTrue(resolver.startsWith("https://"));encrypted=true;}
+            }
+            assertTrue("An independent literal resolver must work before a VPN is selected",literal);
+            assertTrue("Trusted encrypted resolver options remain available",encrypted);
         }
     }
     @Test public void settingsCallbackReloadsWebsiteAndGlobalRulesButPreservesApplicationInterface()throws Exception{
