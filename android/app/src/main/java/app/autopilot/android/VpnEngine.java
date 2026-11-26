@@ -501,6 +501,13 @@ public final class VpnEngine {
     }
     private void applyWatchdog(ConnectionWatchdog.Observation observation)throws Exception{
         if(!observation.snapshot.equals(monitorTarget)||current==null)return;
+        // A result can wait behind a controller job that completes newer, full
+        // application proof for the same route. Never let that obsolete result
+        // quarantine/reject it. Native RTT or partial transport is insufficient.
+        if(obsoleteWatchdogObservation(observation.at,watchdogLastCheck,record(current).appVerifiedAt)){
+            if(observation.code==ConnectionWatchdog.Code.CONFIRMED_FAILED||observation.code==ConnectionWatchdog.Code.CONFIRMED_PARTIAL_FAILED)watchdog.resume();
+            app.log("health","WATCHDOG_OBSERVATION_SUPERSEDED");publish();return;
+        }
         watchdogCode=observation.code;watchdogLastCheck=observation.at;watchdogLastSuccess=observation.lastSuccessAt;
         watchdogFailedOrigins=observation.failedOrigins;watchdogConsecutive=observation.consecutiveFailures;
         // HTTPS health has its own freshness. It must not fabricate or replace measured Google RTT samples.
@@ -532,6 +539,7 @@ public final class VpnEngine {
         }
         warnRetainedServicePath();updateAccountRecovery(false);publish();
     }
+    static boolean obsoleteWatchdogObservation(long observedAt,long lastCheckAt,long fullApplicationProofAt){return observedAt<lastCheckAt||observedAt<fullApplicationProofAt;}
     // Block new unverified connections without tearing down already established flows.
     private void rejectCurrent()throws Exception{action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name","REJECT").toString(),5000);current=null;pinned="";invalidateMonitor();phase="degraded";error="NO_HEALTHY_NODE";detail="New connections are blocked until a verified node is available. Existing connections are kept.";}
     private void scheduleRecovery(){JSONArray delays=ProductContract.policy().optJSONArray("recoveryBackoffMs");nextRecovery=now()+delays.optLong(Math.min(recoveryAttempt++,delays.length()-1));}

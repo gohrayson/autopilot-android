@@ -60,6 +60,20 @@ public class ConnectionWatchdogTest {
         assertNotEquals(first,new ConnectionWatchdog.Snapshot(2,"first",1,27000));assertNotEquals(first,new ConnectionWatchdog.Snapshot(1,"second",1,27000));
         assertNotEquals(first,new ConnectionWatchdog.Snapshot(1,"first",2,27000));assertNotEquals(first,new ConnectionWatchdog.Snapshot(1,"first",1,27001));
     }
+    @Test public void queuedObservationCannotOverrideNewerFullApplicationProof(){
+        SelectionPolicy.Health selected=new SelectionPolicy.Health("first","Selected","JP");
+        selected.configure(2000,List.of("chatgpt"));selected.chatgpt="ok";selected.servicesAt=2000;
+        selected.transportVerified(2000,42);selected.applicationVerified(2000);
+        assertTrue(selected.qualified(2000));
+        assertTrue(VpnEngine.obsoleteWatchdogObservation(1999,1000,selected.appVerifiedAt));
+        assertTrue(VpnEngine.obsoleteWatchdogObservation(1999,2000,0));
+        // A newer/equal failure remains authoritative: a ping/transport success
+        // must not hide a real current application outage.
+        selected.latency(42,4000);selected.transportVerified(4000,42);
+        assertFalse(VpnEngine.obsoleteWatchdogObservation(3000,2500,selected.appVerifiedAt));
+        assertFalse(VpnEngine.obsoleteWatchdogObservation(2000,2000,selected.appVerifiedAt));
+        assertFalse(selected.appRejected);assertEquals(0,selected.appFailureUntil);
+    }
     static ConnectionWatchdog.Observation until(BlockingQueue<ConnectionWatchdog.Observation> events,ConnectionWatchdog.Code code)throws Exception{
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);ConnectionWatchdog.Observation event;
         while(System.nanoTime()<deadline){event=events.poll(100,TimeUnit.MILLISECONDS);if(event!=null&&event.code==code)return event;}

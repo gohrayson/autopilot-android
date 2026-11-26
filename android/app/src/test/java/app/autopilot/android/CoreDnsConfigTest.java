@@ -20,12 +20,18 @@ public final class CoreDnsConfigTest {
         // Resolving encrypted resolver hostnames has literal-IP bootstrap servers,
         // so neither resolving proxy endpoints nor probing them requires a node
         // already selected in AUTOPILOT. Exact desktop parity has its own probe.
-        List<String> bootstrap=strings(dns.getJSONArray("default-nameserver"));assertFalse(bootstrap.isEmpty());
+        List<String> bootstrap=strings(dns.getJSONArray("default-nameserver"));assertEquals(List.of("223.5.5.5","119.29.29.29","114.114.114.114"),bootstrap);
         for(String resolver:bootstrap)assertTrue(resolver,resolver.matches("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"));
         for(String key:List.of("nameserver","proxy-server-nameserver")){
-            List<String> resolvers=strings(dns.getJSONArray(key));assertFalse(resolvers.isEmpty());
-            for(String resolver:resolvers){URI uri=URI.create(resolver);assertEquals("https",uri.getScheme());
-                assertNotNull(uri.getHost());assertNull("DNS must not wait for an AUTOPILOT selection",uri.getFragment());}
+            List<String> resolvers=strings(dns.getJSONArray(key));assertEquals(CoreDnsConfig.DEFAULT_RESOLVERS,resolvers);
+            assertEquals(bootstrap,resolvers.subList(0,bootstrap.size()));
+            assertEquals(CoreDnsConfig.ENCRYPTED_NAMESERVERS,resolvers.subList(bootstrap.size(),resolvers.size()));
+            for(String resolver:resolvers){
+                assertFalse("DNS must not wait for an AUTOPILOT selection",resolver.contains("#"));
+                if(resolver.matches("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"))continue;
+                URI uri=URI.create(resolver);assertEquals("https",uri.getScheme());
+                assertNotNull(uri.getHost());assertNull(uri.getFragment());
+            }
         }
         assertEquals("REJECT",config.getJSONArray("proxy-groups").getJSONObject(0).getJSONArray("proxies").getString(0));
     }
@@ -39,7 +45,12 @@ public final class CoreDnsConfigTest {
         assertEquals(dns.getJSONArray("nameserver").toString(),dns.getJSONArray("proxy-server-nameserver").toString());
         dns.getJSONArray("nameserver").put("192.0.2.1");
         assertEquals(List.of("udp://10.0.2.2:29553"),strings(policy.build().getJSONArray("nameserver")));
-        assertEquals(CoreDnsConfig.ENCRYPTED_NAMESERVERS,strings(CoreDnsConfig.DEFAULT.build().getJSONArray("nameserver")));
+        assertEquals(CoreDnsConfig.DEFAULT_RESOLVERS,strings(CoreDnsConfig.DEFAULT.build().getJSONArray("nameserver")));
+        assertEquals("resilient-alidns-tencent-ipv4",CoreDnsConfig.POLICY_ID);
+        for(List<String> fixed:List.of(CoreDnsConfig.BOOTSTRAP_NAMESERVERS,CoreDnsConfig.ENCRYPTED_NAMESERVERS,CoreDnsConfig.DEFAULT_RESOLVERS))
+            assertThrows(UnsupportedOperationException.class,()->fixed.add("192.0.2.1"));
+        JSONObject defaultCopy=CoreDnsConfig.DEFAULT.build();defaultCopy.getJSONArray("proxy-server-nameserver").put("192.0.2.1");
+        assertEquals(CoreDnsConfig.DEFAULT_RESOLVERS,strings(CoreDnsConfig.DEFAULT.build().getJSONArray("proxy-server-nameserver")));
     }
     @Test public void emptyOrBlankResolverPolicyIsRejected(){
         for(List<String> invalid:List.of(List.<String>of(),List.of(" "))){

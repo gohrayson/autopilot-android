@@ -49,6 +49,33 @@ public final class StreamPromotionRuntimeTest {
             String nonce=UUID.randomUUID().toString();write(context,READY,new JSONObject().put("uid",android.os.Process.myUid()).put("tun",true).put("marker",fixture.marker).put("nonce",nonce));
             await(35000,()->fixture.acknowledged.get()>=3,"Separate-UID established stream acknowledgements");
             VpnEngine engine=app.engine;assertNotNull(engine);
+            int acksBeforeStaleResult=fixture.acknowledged.get();
+            onWorker(engine,()->{
+                Node selected=(Node)field(engine,"current");
+                @SuppressWarnings("unchecked") Map<String,SelectionPolicy.Health> ledger=(Map<String,SelectionPolicy.Health>)field(engine,"health");
+                SelectionPolicy.Health selectedHealth=ledger.get(selected.id);
+                assertTrue("The stale-result fixture starts from real completed production discovery proof",selectedHealth.appVerifiedAt>0&&selectedHealth.qualified(System.currentTimeMillis()));
+                ConnectionWatchdog.Snapshot target=(ConnectionWatchdog.Snapshot)field(engine,"monitorTarget");assertNotNull(target);
+                long proofAt=selectedHealth.appVerifiedAt,previousCheck=(Long)field(engine,"watchdogLastCheck"),priorCooldown=selectedHealth.appFailureUntil;
+                int failuresBefore=events(app,"APPLICATION_PATH_FAILED"),supersededBefore=events(app,"WATCHDOG_OBSERVATION_SUPERSEDED");
+                Field check=VpnEngine.class.getDeclaredField("watchdogLastCheck");check.setAccessible(true);
+                Method apply=VpnEngine.class.getDeclaredMethod("applyWatchdog",ConnectionWatchdog.Observation.class);apply.setAccessible(true);
+                try{
+                    // Model delayed controller delivery after the real full proof.
+                    // Put the delivery watermark before that proof to isolate its
+                    // freshness fence, not merely the out-of-order watermark.
+                    check.setLong(engine,proofAt-2);
+                    for(ConnectionWatchdog.Code code:List.of(ConnectionWatchdog.Code.CONFIRMED_FAILED,ConnectionWatchdog.Code.CONFIRMED_PARTIAL_FAILED))
+                        apply.invoke(engine,new ConnectionWatchdog.Observation(target,code,proofAt-1,0,code==ConnectionWatchdog.Code.CONFIRMED_FAILED?6:2,2,0));
+                    assertEquals(FIRST,nativeSelection());assertFalse(selectedHealth.appRejected);
+                    assertEquals(priorCooldown,selectedHealth.appFailureUntil);assertEquals(failuresBefore,events(app,"APPLICATION_PATH_FAILED"));
+                    assertEquals(supersededBefore+2,events(app,"WATCHDOG_OBSERVATION_SUPERSEDED"));
+                    assertEquals("connected",app.state().optString("phase"));assertEquals(1,tunStarts(app));
+                }finally{check.setLong(engine,previousCheck);}
+                evidence.put("staleWatchdogAfterActualFullProofIgnored",true).put("staleWatchdogFixture","delayed controller delivery after real production discovery proof; delivery watermark temporarily aged");
+            });
+            await(10000,()->fixture.acknowledged.get()>=acksBeforeStaleResult+3,"Established other-UID stream survives obsolete watchdog failures");
+            assertFalse(fixture.streamClosed.get());
             evidence.put("accountRecoverySettings",new JSONObject().put("hasAutoRefresh",app.settings().has("autoRefresh")).put("enabled",AccountRecoveryPolicy.enabled(app.settings())).put("engineAllowed",engine.accountRecoveryAllowed()));
             assertTrue("The shared default must enable account recovery without a fixture override",AccountRecoveryPolicy.enabled(app.settings()));
             assertTrue("Production engine lifecycle must allow account recovery before incident evidence",engine.accountRecoveryAllowed());

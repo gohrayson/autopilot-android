@@ -4,17 +4,22 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import java.util.List;
+import java.util.stream.Stream;
+import java.util.stream.Collectors;
 
 /** Resolver policy shared by outbound bootstrapping and DNS arriving through the TUN. */
 final class CoreDnsConfig {
-    static final String POLICY_ID="desktop-alidns-tencent-ipv4";
+    static final String POLICY_ID="resilient-alidns-tencent-ipv4";
     // Keep the production policy aligned with src/main/core.js. Resolving a proxy's
     // hostname must work before AUTOPILOT can select a working proxy.
     static final boolean IPV6_ENABLED=false;
-    static final List<String> BOOTSTRAP_NAMESERVERS=List.of("223.5.5.5","119.29.29.29");
+    static final List<String> BOOTSTRAP_NAMESERVERS=List.of("223.5.5.5","119.29.29.29","114.114.114.114");
     static final List<String> ENCRYPTED_NAMESERVERS=List.of("https://dns.alidns.com/dns-query","https://doh.pub/dns-query");
+    // Direct literal resolvers remain usable when the encrypted resolver's own
+    // network path is unavailable. HTTPS resolver trust/hostname checks stay on.
+    static final List<String> DEFAULT_RESOLVERS=List.copyOf(Stream.concat(BOOTSTRAP_NAMESERVERS.stream(),ENCRYPTED_NAMESERVERS.stream()).collect(Collectors.toList()));
     static final List<String> FAKE_IP_FILTER=List.of("*.lan","*.local","+.msftconnecttest.com","+.msftncsi.com","localhost.ptlogin2.qq.com");
-    static final CoreDnsConfig DEFAULT=new CoreDnsConfig(BOOTSTRAP_NAMESERVERS,ENCRYPTED_NAMESERVERS);
+    static final CoreDnsConfig DEFAULT=new CoreDnsConfig(BOOTSTRAP_NAMESERVERS,DEFAULT_RESOLVERS);
 
     private final List<String> bootstrap,resolvers;
 
