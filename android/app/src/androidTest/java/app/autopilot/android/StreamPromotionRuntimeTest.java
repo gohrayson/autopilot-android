@@ -25,10 +25,10 @@ import static org.junit.Assert.*;
 /** Hosted emulator only: real discovery/selector/TUN and a continuous separate-UID stream. */
 @RunWith(AndroidJUnit4.class)
 public final class StreamPromotionRuntimeTest {
-    private static final String FIRST="Autopilot Stream Japan 00 First",SECOND="Autopilot Stream Japan 01 Second";
+    private static final String FIRST="Autopilot Stream Japan 00 First",SECOND="Autopilot Stream Japan 01 Second",THIRD="Autopilot Stream Japan 02 Recovery";
     private static final String RENEWED="Autopilot Recovery Japan Fresh Catalog";
     private static final String READY="stream-promotion-ready.json",COMPLETE="stream-promotion-complete";
-    @Test(timeout=300000) public void expiredRankingPromotionPreservesOldSocketAndConfirmedFailureClosesIt()throws Exception {
+    @Test(timeout=360000) public void automaticPromotionRejectAndRecoveryPreserveOldSocket()throws Exception {
         Assume.assumeTrue("Require explicit hosted public TLS opt-in","true".equals(InstrumentationRegistry.getArguments().getString("hostedAllowPublicTransport")));
         Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();AutopilotApp app=(AutopilotApp)context.getApplicationContext();
         assertNull(app.engine);assertTrue(app.providers.nodes().isEmpty());assertNull(VpnService.prepare(context));
@@ -37,7 +37,7 @@ public final class StreamPromotionRuntimeTest {
         JSONObject evidence=new JSONObject();Fixture fixture=new Fixture();
         ProviderRepository originalProviders=app.providers;Runnable sourceChanged=originalProviders.onChanged;
         AtomicLong accountClock=new AtomicLong(System.currentTimeMillis());
-        JSONArray initialOutbounds=new JSONArray().put(outbound(FIRST,"first",fixture.port())).put(outbound(SECOND,"second",fixture.port()));
+        JSONArray initialOutbounds=new JSONArray().put(outbound(FIRST,"first",fixture.port())).put(outbound(SECOND,"second",fixture.port())).put(outbound(THIRD,"third",fixture.port()));
         CatalogFixture catalog=new CatalogFixture(initialOutbounds,accountClock);
         try{
             app.setSettings(new JSONObject().put("required",new JSONArray().put("chatgpt")));
@@ -123,13 +123,40 @@ public final class StreamPromotionRuntimeTest {
             assertFalse("Healthy promotion closed the established stream",fixture.streamClosed.get());
             evidence.put("automaticDiscoveryPromotion",true).put("promotionMs",promotionMillis).put("oldSocketContinuous",true)
                 .put("oldSocketMessagesAfterPromotion",fixture.afterPromotionAcks.get()).put("newSocketUsesSecondOutbound",true);
-            // Only future connection attempts fail. The already established first-node
-            // stream still runs until the real two-round HTTPS watchdog invokes REJECT.
+            // Only future connection attempts fail. The actual two-round watchdog
+            // must block new connections without closing the established first-node stream.
             fixture.secondEnabled.set(false);fixture.closeControlChecks("second");
             await(65000,()->events(app,"APPLICATION_PATH_FAILED")>0&&app.state().optString("current").isEmpty(),"Production watchdog confirmed broad failure");
             assertEquals("REJECT",nativeSelection());
-            await(10000,fixture.streamClosed::get,"Confirmed recovery closes old native stream");
-            evidence.put("confirmedWatchdogFailure",true).put("confirmedRecoveryClosedStream",true).put("nativeReject",true).put("tunStarts",tunStarts(app));
+            onWorker(engine,()->{
+                @SuppressWarnings("unchecked") Map<String,SelectionPolicy.Health> ledger=(Map<String,SelectionPolicy.Health>)field(engine,"health");
+                SelectionPolicy.Health failed=ledger.values().stream().filter(h->SECOND.equals(h.name)).findFirst().orElseThrow();
+                assertTrue(failed.appRejected);assertFalse(failed.qualified(System.currentTimeMillis()));
+            });
+            fixture.rejected.set(true);
+            await(10000,()->fixture.afterRejectAcks.get()>=3&&fixture.newConnectionRejected.get(),"Same other-UID socket advances while new connections are rejected");
+            assertFalse("Automatic REJECT closed an established stream",fixture.streamClosed.get());assertEquals(1,tunStarts(app));
+            evidence.put("confirmedWatchdogFailure",true).put("confirmedRecoveryPreservedStream",true).put("nativeReject",true).put("newConnectionsRejected",true)
+                .put("oldSocketMessagesAfterReject",fixture.afterRejectAcks.get());
+            fixture.thirdEnabled.set(true);engine.retest();
+            await(30000,()->THIRD.equals(app.state().optString("current")),"Fresh replacement selected by production discovery after confirmed failure");
+            assertEquals(THIRD,nativeSelection());assertEquals(1,tunStarts(app));
+            onWorker(engine,()->{
+                Node selected=(Node)field(engine,"current");assertEquals(THIRD,selected.name);
+                @SuppressWarnings("unchecked") Map<String,SelectionPolicy.Health> ledger=(Map<String,SelectionPolicy.Health>)field(engine,"health");
+                assertTrue("Recovery replacement must pass fresh production qualification",ledger.get(selected.id).qualified(System.currentTimeMillis()));
+                SelectionPolicy.Health failed=ledger.values().stream().filter(h->SECOND.equals(h.name)).findFirst().orElseThrow();
+                assertTrue("Failed route remains rejected after replacement",failed.appRejected);assertFalse(failed.qualified(System.currentTimeMillis()));
+            });
+            fixture.recovered.set(true);
+            await(10000,()->fixture.afterRecoveryAcks.get()>=3&&fixture.freshThirdConnections.get()>=1,"Same old socket and new socket through the freshly verified recovery outbound");
+            assertFalse("Automatic recovery closed an established stream",fixture.streamClosed.get());
+            assertEquals(1,tunStarts(app));
+            evidence.put("automaticRecoveryPromotion",true).put("recoveryPreservedStream",true).put("newSocketUsesRecoveryOutbound",true)
+                .put("oldSocketMessagesAfterRecovery",fixture.afterRecoveryAcks.get()).put("tunStartsAfterAutomaticRecovery",1);
+            // End only the owned observer after the continuity assertions, before
+            // the separate changed-profile test that intentionally re-attaches TUN.
+            fixture.finishProbe.set(true);
             File completed=new File(context.getFilesDir(),COMPLETE);
             await(15000,completed::isFile,"Separate-UID probe final receipt");
             JSONObject result=new JSONObject(new String(Files.readAllBytes(completed.toPath()),StandardCharsets.UTF_8));
@@ -137,8 +164,8 @@ public final class StreamPromotionRuntimeTest {
             assertTrue(fixture.tlsHosts.containsAll(Fixture.HOSTS));assertTrue(fixture.tlsSent.get()>0&&fixture.tlsReceived.get()>0);
             assertEquals(0,fixture.denied.get());assertNull(fixture.failure.get());
             evidence.put("separateUid",true).put("platformTls",true).put("threeWatchdogOrigins",true);
-            // With the deliberately failed old stream already closed, publish a
-            // different valid catalog. Android's current guarded profile install
+            // With the observer finished intentionally, publish a different valid
+            // catalog. Android's current guarded profile install
             // pauses/re-attaches TUN; do not claim stream continuity through it.
             assertEquals(1,tunStarts(app));evidence.put("tunStartsBeforeCatalogChange",1);
             catalog.outbounds.set(new JSONArray().put(outbound(RENEWED,"first",fixture.port())));catalog.clock.addAndGet(new AccountRecoveryPolicy().refreshMinGapMs+1000);fixture.firstEnabled.set(true);
@@ -165,7 +192,7 @@ public final class StreamPromotionRuntimeTest {
                 for(String name:List.of(READY,READY+".tmp",COMPLETE,COMPLETE+".tmp"))Files.deleteIfExists(new File(context.getFilesDir(),name).toPath());
             }
         }
-        String receipt="AUTOPILOT_STREAM_PROMOTION_RUNTIME_ACCEPTED automaticDiscovery=true staleOldProof=true sameOldSocket=true newSocketNewOutbound=true confirmedRecoveryCloses=true separateUid=true accountRecovery=true unchangedCatalogPreservesStream=true changedCatalogQualified=true tunStartsBeforeCatalogChange=1 tunStartsAfterCatalogChange=2 platformTls=true stopCleanup=true fixtureCleanup=true";
+        String receipt="AUTOPILOT_STREAM_PROMOTION_RUNTIME_ACCEPTED automaticDiscovery=true staleOldProof=true sameOldSocket=true newSocketNewOutbound=true confirmedRecoveryPreserves=true rejectBlocksNew=true recoveryNewOutbound=true selectorChangesNoTunRestart=true separateUid=true accountRecovery=true unchangedCatalogPreservesStream=true changedCatalogQualified=true tunStartsBeforeCatalogChange=1 tunStartsAfterCatalogChange=2 platformTls=true stopCleanup=true fixtureCleanup=true";
         System.out.println(receipt);Bundle status=new Bundle();status.putString("stream",receipt+"\n");InstrumentationRegistry.getInstrumentation().sendStatus(2,status);
     }
     private static JSONObject outbound(String name,String user,int port)throws Exception{return new JSONObject().put("name",name).put("type","socks5").put("server","127.0.0.1").put("port",port).put("username",user).put("password","synthetic-stream-only");}
@@ -215,8 +242,8 @@ public final class StreamPromotionRuntimeTest {
         final ServerSocket listener=new ServerSocket(0,64,InetAddress.getByName("127.0.0.1"));
         final Set<Socket> sockets=ConcurrentHashMap.newKeySet();final Map<Socket,String> controlChecks=new ConcurrentHashMap<>();final Set<String> tlsHosts=ConcurrentHashMap.newKeySet(),tlsByNode=ConcurrentHashMap.newKeySet(),deniedTargets=ConcurrentHashMap.newKeySet();
         final Set<String> exitHosts=ConcurrentHashMap.newKeySet();final AtomicInteger exitSessions=new AtomicInteger();final AtomicLong exitSent=new AtomicLong(),exitReceived=new AtomicLong();
-        final AtomicBoolean firstEnabled=new AtomicBoolean(true),secondEnabled=new AtomicBoolean(),promoted=new AtomicBoolean(),streamClosed=new AtomicBoolean(),closed=new AtomicBoolean();
-        final AtomicInteger acknowledged=new AtomicInteger(),afterPromotionAcks=new AtomicInteger(),freshSecondConnections=new AtomicInteger(),denied=new AtomicInteger(),privateDnsValidationRefused=new AtomicInteger();
+        final AtomicBoolean firstEnabled=new AtomicBoolean(true),secondEnabled=new AtomicBoolean(),thirdEnabled=new AtomicBoolean(),promoted=new AtomicBoolean(),rejected=new AtomicBoolean(),recovered=new AtomicBoolean(),finishProbe=new AtomicBoolean(),probeFinishedIntentionally=new AtomicBoolean(),newConnectionRejected=new AtomicBoolean(),streamClosed=new AtomicBoolean(),closed=new AtomicBoolean();
+        final AtomicInteger acknowledged=new AtomicInteger(),afterPromotionAcks=new AtomicInteger(),afterRejectAcks=new AtomicInteger(),afterRecoveryAcks=new AtomicInteger(),freshSecondConnections=new AtomicInteger(),freshThirdConnections=new AtomicInteger(),denied=new AtomicInteger(),privateDnsValidationRefused=new AtomicInteger();
         final AtomicLong tlsSent=new AtomicLong(),tlsReceived=new AtomicLong();final AtomicReference<String> failure=new AtomicReference<>();
         final ExecutorService workers=pool(16,64,"stream-socks"),pumps=pool(12,64,"stream-tls");final Thread accept;
         Fixture()throws IOException{accept=new Thread(()->{while(!closed.get())try{Socket client=listener.accept();sockets.add(client);workers.execute(()->serve(client));}catch(IOException failure){if(!closed.get())this.failure.compareAndSet(null,"ACCEPT_FAILED");}},"stream-fixture-accept");accept.setDaemon(true);accept.start();}
@@ -226,12 +253,12 @@ public final class StreamPromotionRuntimeTest {
                 client.setSoTimeout(10000);DataInputStream input=new DataInputStream(client.getInputStream());OutputStream output=client.getOutputStream();
                 if(input.readUnsignedByte()!=5)throw new IOException("SOCKS_VERSION");int methods=input.readUnsignedByte();boolean auth=false;for(int i=0;i<methods;i++)if(input.readUnsignedByte()==2)auth=true;if(!auth)throw new IOException("AUTH_REQUIRED");output.write(new byte[]{5,2});output.flush();
                 if(input.readUnsignedByte()!=1)throw new IOException("AUTH_VERSION");byte[] user=new byte[input.readUnsignedByte()];input.readFully(user);byte[] password=new byte[input.readUnsignedByte()];input.readFully(password);String username=new String(user,StandardCharsets.US_ASCII);
-                if(!Arrays.equals(password,"synthetic-stream-only".getBytes(StandardCharsets.US_ASCII))||!Set.of("first","second").contains(username))throw new IOException("AUTH_INVALID");
-                if("first".equals(username)?!firstEnabled.get():!secondEnabled.get()){output.write(new byte[]{1,1});output.flush();return;}
+                if(!Arrays.equals(password,"synthetic-stream-only".getBytes(StandardCharsets.US_ASCII))||!Set.of("first","second","third").contains(username))throw new IOException("AUTH_INVALID");
+                if(!enabled(username)){output.write(new byte[]{1,1});output.flush();return;}
                 output.write(new byte[]{1,0});output.flush();if(input.readUnsignedByte()!=5||input.readUnsignedByte()!=1||input.readUnsignedByte()!=0)throw new IOException("SOCKS_COMMAND");
                 int type=input.readUnsignedByte();String host;if(type==1){byte[] ip=new byte[4];input.readFully(ip);host=InetAddress.getByAddress(ip).getHostAddress();}else if(type==3){byte[] name=new byte[input.readUnsignedByte()];input.readFully(name);host=new String(name,StandardCharsets.US_ASCII).toLowerCase(Locale.ROOT);}else throw new IOException("ADDRESS_DENIED");int port=input.readUnsignedShort();
                 if(port==80&&"203.0.113.7".equals(host)){accepted(output);stream(client,input,output,username);return;}
-                if(port==80&&"203.0.113.8".equals(host)){accepted(output);String request=line(input);if(!("FRESH "+marker).equals(request))throw new IOException("FRESH_MARKER");output.write(("NEW "+username+" "+marker+"\n").getBytes(StandardCharsets.US_ASCII));output.flush();if("second".equals(username))freshSecondConnections.incrementAndGet();return;}
+                if(port==80&&"203.0.113.8".equals(host)){accepted(output);String request=line(input);if(!("FRESH "+marker).equals(request))throw new IOException("FRESH_MARKER");output.write(("NEW "+username+" "+marker+"\n").getBytes(StandardCharsets.US_ASCII));output.flush();if("second".equals(username))freshSecondConnections.incrementAndGet();if("third".equals(username))freshThirdConnections.incrementAndGet();return;}
                 // Android validates Private DNS on the exact production TUN DNS
                 // address. The fixture never forwards that internal port externally.
                 if(port==853&&"172.19.0.2".equals(host)){privateDnsValidationRefused.incrementAndGet();output.write(new byte[]{5,2,0,1,0,0,0,0,0,0});output.flush();return;}
@@ -252,8 +279,12 @@ public final class StreamPromotionRuntimeTest {
         private void stream(Socket client,InputStream input,OutputStream output,String user)throws IOException{
             if(!"first".equals(user)||!("STREAM "+marker).equals(line(input)))throw new IOException("STREAM_IDENTITY");
             int sequence=0;try{while(!closed.get()){
-                boolean after=promoted.get();output.write((marker+" first "+(after?"PROMOTED":"INITIAL")+" "+(++sequence)+"\n").getBytes(StandardCharsets.US_ASCII));output.flush();
-                if(!("ACK "+sequence).equals(line(input)))throw new EOFException("Stream acknowledgement lost");acknowledged.incrementAndGet();if(after)afterPromotionAcks.incrementAndGet();
+                String phase=finishProbe.get()?"COMPLETE":recovered.get()?"RECOVERED":rejected.get()?"REJECTED":promoted.get()?"PROMOTED":"INITIAL";
+                output.write((marker+" first "+phase+" "+(++sequence)+"\n").getBytes(StandardCharsets.US_ASCII));output.flush();
+                if(!("ACK "+sequence+" "+phase).equals(line(input)))throw new EOFException("Stream acknowledgement lost");acknowledged.incrementAndGet();if(!"INITIAL".equals(phase))afterPromotionAcks.incrementAndGet();
+                if("REJECTED".equals(phase)){afterRejectAcks.incrementAndGet();newConnectionRejected.set(true);}
+                if("RECOVERED".equals(phase))afterRecoveryAcks.incrementAndGet();
+                if("COMPLETE".equals(phase)){probeFinishedIntentionally.set(true);return;}
                 try{Thread.sleep(200);}catch(InterruptedException cancelled){Thread.currentThread().interrupt();return;}
             }}finally{streamClosed.set(true);}
         }
@@ -262,10 +293,10 @@ public final class StreamPromotionRuntimeTest {
         private static void accepted(OutputStream out)throws IOException{out.write(new byte[]{5,0,0,1,127,0,0,1,0,0});out.flush();}
         private static void copy(Socket source,Socket target,AtomicLong count){try{byte[] buffer=new byte[16384];int n;InputStream input=source.getInputStream();OutputStream output=target.getOutputStream();while((n=input.read(buffer))!=-1){output.write(buffer,0,n);output.flush();count.addAndGet(n);}}catch(IOException ignored){}finally{try{target.shutdownOutput();}catch(IOException ignored){}}}
         void closeControlChecks(String user){for(Map.Entry<Socket,String> entry:controlChecks.entrySet())if(user.equals(entry.getValue()))closeSocket(entry.getKey());}
-        private boolean enabled(String user){return "first".equals(user)?firstEnabled.get():secondEnabled.get();}
+        private boolean enabled(String user){return "first".equals(user)?firstEnabled.get():"second".equals(user)?secondEnabled.get():thirdEnabled.get();}
         private void closeSocket(Socket socket){controlChecks.remove(socket);sockets.remove(socket);try{socket.close();}catch(IOException ignored){}}
         private static ExecutorService pool(int threads,int queued,String name){return new ThreadPoolExecutor(threads,threads,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(queued),job->{Thread thread=new Thread(job,name);thread.setDaemon(true);return thread;},new ThreadPoolExecutor.AbortPolicy());}
-        JSONObject stats()throws Exception{return new JSONObject().put("acknowledged",acknowledged.get()).put("afterPromotionAcks",afterPromotionAcks.get()).put("freshSecondConnections",freshSecondConnections.get()).put("streamClosed",streamClosed.get()).put("tlsHosts",new JSONArray(new TreeSet<>(tlsHosts))).put("tlsByNode",new JSONArray(new TreeSet<>(tlsByNode))).put("tlsSent",tlsSent.get()).put("tlsReceived",tlsReceived.get()).put("exitMeasurementSessions",exitSessions.get()).put("exitMeasurementHosts",new JSONArray(new TreeSet<>(exitHosts))).put("exitMeasurementSent",exitSent.get()).put("exitMeasurementReceived",exitReceived.get()).put("privateDnsValidationRefused",privateDnsValidationRefused.get()).put("denied",denied.get()).put("deniedTargets",new JSONArray(new TreeSet<>(deniedTargets))).put("failure",failure.get()==null?"":failure.get()).put("openSockets",sockets.size()).put("closed",closed.get());}
+        JSONObject stats()throws Exception{return new JSONObject().put("acknowledged",acknowledged.get()).put("afterPromotionAcks",afterPromotionAcks.get()).put("afterRejectAcks",afterRejectAcks.get()).put("afterRecoveryAcks",afterRecoveryAcks.get()).put("freshSecondConnections",freshSecondConnections.get()).put("freshThirdConnections",freshThirdConnections.get()).put("newConnectionRejected",newConnectionRejected.get()).put("probeFinishedIntentionally",probeFinishedIntentionally.get()).put("streamClosed",streamClosed.get()).put("tlsHosts",new JSONArray(new TreeSet<>(tlsHosts))).put("tlsByNode",new JSONArray(new TreeSet<>(tlsByNode))).put("tlsSent",tlsSent.get()).put("tlsReceived",tlsReceived.get()).put("exitMeasurementSessions",exitSessions.get()).put("exitMeasurementHosts",new JSONArray(new TreeSet<>(exitHosts))).put("exitMeasurementSent",exitSent.get()).put("exitMeasurementReceived",exitReceived.get()).put("privateDnsValidationRefused",privateDnsValidationRefused.get()).put("denied",denied.get()).put("deniedTargets",new JSONArray(new TreeSet<>(deniedTargets))).put("failure",failure.get()==null?"":failure.get()).put("openSockets",sockets.size()).put("closed",closed.get());}
         @Override public void close()throws Exception{closed.set(true);listener.close();accept.join(5000);for(Socket socket:sockets)closeSocket(socket);workers.shutdownNow();pumps.shutdownNow();assertTrue(workers.awaitTermination(6,TimeUnit.SECONDS));assertTrue(pumps.awaitTermination(6,TimeUnit.SECONDS));assertFalse(accept.isAlive());assertTrue(sockets.isEmpty());}
     }
 }

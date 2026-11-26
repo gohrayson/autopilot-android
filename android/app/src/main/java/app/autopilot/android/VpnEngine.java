@@ -125,7 +125,7 @@ public final class VpnEngine {
                 if(!pinned.isEmpty()&&current!=null&&pinned.equals(current.id)&&currentUsable())return;
                 SelectionPolicy.Health best=SelectionPolicy.best(health.values(),app.preferred(),now());
                 if(best==null||!best.id.equals(node.id))return;
-                if(needsRoute()||finalComparison&&shouldSwitch(current==null?null:record(current),h,force))try{promote(node,automaticPromotionClosesExisting(current==null?null:record(current)));}
+                if(needsRoute()||finalComparison&&shouldSwitch(current==null?null:record(current),h,force))try{promote(node,false);}
                 catch(Exception failure){if(running.get()&&!stopping.get()){h.applicationFailed(now());app.log("selection","CANDIDATE_PROMOTION_FAILED");}throw failure;}
             }
             public Node finalCandidate(Set<Node> attempted,boolean force){
@@ -405,7 +405,7 @@ public final class VpnEngine {
                 // Fresh evidence can reorder candidates. Compare the new winner before promotion.
                 continue;
             }
-            if(shouldSwitch(active,best,force)){promote(candidate,automaticPromotionClosesExisting(active));}
+            if(shouldSwitch(active,best,force)){promote(candidate,false);}
             return;
         }
     }
@@ -420,10 +420,8 @@ public final class VpnEngine {
         h.transportVerified(now(),result.latencyMillis);probeServices(node);if(!h.eligibleForProof(now()))return false;
         h.applicationVerified(now());return h.qualified(now());
     }
-    /** Ranking/proof expiry permits a fresh replacement, but does not prove that
-     * established streams failed. Only an absent or explicitly rejected selected
-     * route gives automatic promotion permission to close existing connections. */
-    static boolean automaticPromotionClosesExisting(SelectionPolicy.Health selected){return selected==null||selected.appRejected;}
+    // Automatic selector changes affect new connections. Probe failures do not
+    // establish that every existing stream failed; only manual selection closes them.
     private void promote(Node node,boolean closeExisting)throws Exception{
         // Cancellation may yield read-only discovery, never a half-applied selector mutation.
         boolean cancellable;
@@ -525,7 +523,7 @@ public final class VpnEngine {
             inSweep=true;
             try{for(SelectionPolicy.Health candidate:ordered){if(candidate.id.equals(prior.id)||!candidate.eligibleForProof(now()))continue;if(attempted++>=ProductContract.policyInt("comparativeCandidateLimit")||now()>deadline)break;
                 Node replacement=findById(candidate.id);if(replacement!=null&&verifyCandidate(replacement,observation.failedMask)){
-                    record(prior).applicationFailed(now());pinned="";promote(replacement,true);
+                    record(prior).applicationFailed(now());pinned="";promote(replacement,false);
                     selectedProviderRecovery.confirmed(observation.snapshot,prior,observation.code,true);
                     app.log("health","APPLICATION_PATH_COMPARATIVE_RECOVERY");break;
                 }
@@ -534,7 +532,8 @@ public final class VpnEngine {
         }
         warnRetainedServicePath();updateAccountRecovery(false);publish();
     }
-    private void rejectCurrent()throws Exception{action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name","REJECT").toString(),5000);action("closeAllConnections",null,5000);current=null;pinned="";invalidateMonitor();phase="degraded";error="NO_HEALTHY_NODE";detail="No verified replacement. VPN is blocking unverified traffic.";}
+    // Block new unverified connections without tearing down already established flows.
+    private void rejectCurrent()throws Exception{action("changeProxy",new JSONObject().put("group-name","AUTOPILOT").put("proxy-name","REJECT").toString(),5000);current=null;pinned="";invalidateMonitor();phase="degraded";error="NO_HEALTHY_NODE";detail="New connections are blocked until a verified node is available. Existing connections are kept.";}
     private void scheduleRecovery(){JSONArray delays=ProductContract.policy().optJSONArray("recoveryBackoffMs");nextRecovery=now()+delays.optLong(Math.min(recoveryAttempt++,delays.length()-1));}
     private void recoverBounded()throws Exception{if(paused())return;decide(true);if(current==null)scheduleRecovery();}
     private void progress(String step,String message){stage=step;detail=message;publish();}
