@@ -74,6 +74,41 @@ public class ConnectionWatchdogTest {
         assertFalse(VpnEngine.obsoleteWatchdogObservation(2000,2000,selected.appVerifiedAt));
         assertFalse(selected.appRejected);assertEquals(0,selected.appFailureUntil);
     }
+    @Test public void repeatedResumesDuringBlockedRoundDoNotCreateOrphanTimers()throws Exception{
+        CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);AtomicInteger calls=new AtomicInteger();
+        BlockingQueue<ConnectionWatchdog.Observation> events=new LinkedBlockingQueue<>();
+        ConnectionWatchdog.Probe probe=new ConnectionWatchdog.Probe(){
+            public ConnectionWatchdog.Result check(int port)throws InterruptedException{if(calls.incrementAndGet()==1){entered.countDown();release.await();}return new ConnectionWatchdog.Result(6);}
+            public void cancel(){}
+        };
+        try(ConnectionWatchdog watchdog=new ConnectionWatchdog(probe,events::add,System::currentTimeMillis,80,30)){
+            watchdog.target(first);assertTrue(entered.await(1,TimeUnit.SECONDS));
+            for(int i=0;i<100;i++)watchdog.resume();
+            assertFalse("Resume must leave the in-flight round intact",release.await(120,TimeUnit.MILLISECONDS));
+            assertEquals(1,calls.get());release.countDown();
+            ConnectionWatchdog.Observation confirmed=until(events,ConnectionWatchdog.Code.CONFIRMED_FAILED);assertEquals(2,calls.get());
+            assertEquals(2,confirmed.failedOrigins);
+            // A stopped confirmed incident must have no older timer chain left
+            // to wake up, adopt the current route and restart itself.
+            CountDownLatch quiet=new CountDownLatch(1);assertFalse(quiet.await(200,TimeUnit.MILLISECONDS));assertEquals(2,calls.get());
+        }finally{release.countDown();}
+    }
+    @Test public void earlyMatchingBroadRoundsRetainTheFirstConfirmationAnchor()throws Exception{
+        AtomicLong clock=new AtomicLong();AtomicInteger calls=new AtomicInteger();BlockingQueue<ConnectionWatchdog.Observation> events=new LinkedBlockingQueue<>();
+        ConnectionWatchdog.Probe probe=new ConnectionWatchdog.Probe(){public ConnectionWatchdog.Result check(int port){clock.set(1000+(calls.getAndIncrement()*8L));return new ConnectionWatchdog.Result(6);}public void cancel(){}};
+        try(ConnectionWatchdog watchdog=new ConnectionWatchdog(probe,events::add,clock::get,80,30)){
+            watchdog.target(first);ConnectionWatchdog.Observation suspect=until(events,ConnectionWatchdog.Code.SUSPECT),confirmed=until(events,ConnectionWatchdog.Code.CONFIRMED_FAILED);
+            assertEquals(1000,suspect.at);assertEquals(1032,confirmed.at);assertEquals(5,calls.get());assertTrue(confirmed.at-suspect.at>=30);
+        }
+    }
+    @Test public void healthyRoundResetsAnEarlyPartialFailureAnchor()throws Exception{
+        AtomicLong clock=new AtomicLong();AtomicInteger calls=new AtomicInteger();BlockingQueue<ConnectionWatchdog.Observation> events=new LinkedBlockingQueue<>();
+        ConnectionWatchdog.Probe probe=new ConnectionWatchdog.Probe(){public ConnectionWatchdog.Result check(int port){int step=calls.getAndIncrement();clock.set(1000+step*8L);return new ConnectionWatchdog.Result(step==2?0:2);}public void cancel(){}};
+        try(ConnectionWatchdog watchdog=new ConnectionWatchdog(probe,events::add,clock::get,30,30)){
+            watchdog.target(first);ConnectionWatchdog.Observation healthy=until(events,ConnectionWatchdog.Code.HEALTHY),confirmed=until(events,ConnectionWatchdog.Code.CONFIRMED_PARTIAL_FAILED);
+            assertEquals(1016,healthy.at);assertEquals(1056,confirmed.at);assertEquals(8,calls.get());assertEquals(2,confirmed.failedMask);
+        }
+    }
     static ConnectionWatchdog.Observation until(BlockingQueue<ConnectionWatchdog.Observation> events,ConnectionWatchdog.Code code)throws Exception{
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);ConnectionWatchdog.Observation event;
         while(System.nanoTime()<deadline){event=events.poll(100,TimeUnit.MILLISECONDS);if(event!=null&&event.code==code)return event;}

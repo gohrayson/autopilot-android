@@ -209,6 +209,7 @@ public final class StreamPromotionRuntimeTest {
                 .put("catalogHttpRequests",catalog.requests.get()).put("providerApi","memory-only synthetic OneVPN HTTP boundary; no vendor requests");
         }finally{
             try{
+                evidence.put("stateBeforeCleanup",app.state());
                 context.startService(new Intent(context,AutopilotVpnService.class).setAction(AutopilotVpnService.STOP));
                 await(15000,()->app.engine==null,"Production Stop engine cleanup");assertFalse(app.state().optBoolean("tun"));evidence.put("stopCleanup",true);
             }finally{

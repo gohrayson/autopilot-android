@@ -32,13 +32,14 @@ public final class ConnectionWatchdog implements AutoCloseable {
     private final Probe probe;private final Consumer<Observation> sink;private final LongSupplier clock;
     private final long interval,confirmDelay;
     private final ScheduledExecutorService executor=Executors.newSingleThreadScheduledExecutor();
-    private Snapshot active;private ScheduledFuture<?> next;private boolean closed,checking,accelerate;
+    private Snapshot active;private ScheduledFuture<?> next;private boolean closed,checking,accelerate,resumeAfterCheck;
+    private long timerSequence;
     private int consecutive,lastMask;private final java.util.ArrayDeque<Long> routeErrors=new java.util.ArrayDeque<>();private long suspectAt,lastSuccess,lastRouteError,lastExpedited;
     public ConnectionWatchdog(Probe probe,Consumer<Observation> sink){this(probe,sink,System::currentTimeMillis,INTERVAL,CONFIRM_DELAY);}
     ConnectionWatchdog(Probe probe,Consumer<Observation> sink,LongSupplier clock,long interval,long confirmDelay){this.probe=probe;this.sink=sink;this.clock=clock;this.interval=interval;this.confirmDelay=confirmDelay;}
     public synchronized void target(Snapshot snapshot){
         if(closed||Objects.equals(active,snapshot))return;
-        active=snapshot;consecutive=lastMask=0;routeErrors.clear();suspectAt=lastSuccess=0;
+        active=snapshot;consecutive=lastMask=0;routeErrors.clear();suspectAt=lastSuccess=0;resumeAfterCheck=false;
         if(next!=null)next.cancel(true);probe.cancel();
         if(snapshot!=null)schedule(0);
     }
@@ -47,30 +48,40 @@ public final class ConnectionWatchdog implements AutoCloseable {
         long now=clock.getAsLong();while(!routeErrors.isEmpty()&&now-routeErrors.peekFirst()>ProductContract.policyLong("nativeBurstWindowMs"))routeErrors.removeFirst();routeErrors.addLast(now);lastRouteError=now;
         if(active!=null&&routeErrors.size()>=ProductContract.policyInt("nativeBurstCount")&&consecutive==0&&(lastExpedited==0||now-lastExpedited>=ProductContract.policyLong("nativeBurstMinGapMs"))){routeErrors.clear();lastExpedited=now;if(checking)accelerate=true;else{if(next!=null)next.cancel(false);schedule(ProductContract.policyLong("nativeBurstDelayMs"));}}
     }
-    public synchronized void resume(){if(!closed&&active!=null){consecutive=lastMask=0;suspectAt=0;schedule(interval);}}
-    private synchronized void schedule(long delay){if(!closed&&active!=null)next=executor.schedule(this::run,delay,TimeUnit.MILLISECONDS);}
-    private void run(){
+    public synchronized void resume(){if(!closed&&active!=null){
+        consecutive=lastMask=0;suspectAt=0;
+        // Never fork a second timer chain or interrupt a live read-only round.
+        if(checking)resumeAfterCheck=true;else schedule(interval);
+    }}
+    private synchronized void schedule(long delay){if(!closed&&active!=null){
+        if(next!=null)next.cancel(false);
+        long token=++timerSequence;next=executor.schedule(()->run(token),delay,TimeUnit.MILLISECONDS);
+    }}
+    private void run(long token){
         Snapshot captured;
-        synchronized(this){if(closed||active==null)return;captured=active;checking=true;}
+        synchronized(this){if(closed||active==null||token!=timerSequence)return;next=null;captured=active;checking=true;}
         emit(captured,Code.CHECKING,clock.getAsLong(),0,0);
         Result result;
-        try{result=probe.check(captured.port);}catch(InterruptedException cancelled){Thread.interrupted();synchronized(this){checking=false;}return;}
+        try{result=probe.check(captured.port);}catch(InterruptedException cancelled){Thread.interrupted();synchronized(this){checking=false;if(resumeAfterCheck&&!closed&&captured.equals(active)){resumeAfterCheck=false;schedule(interval);}}return;}
         catch(RuntimeException failure){result=new Result(7);}
         synchronized(this){
             checking=false;if(closed||!captured.equals(active))return;
-            long now=clock.getAsLong();Code code;
+            long now=clock.getAsLong();boolean resumed=resumeAfterCheck;resumeAfterCheck=false;Code code;
             if(result.broadFailure()){
-                if(consecutive>0&&confirmsBroad(lastMask,result.failedMask,now-suspectAt,confirmDelay)){consecutive++;code=Code.CONFIRMED_FAILED;}
+                if(consecutive>0&&now>=suspectAt&&Integer.bitCount(lastMask&result.failedMask)>=ProductContract.policyInt("broadFailureOriginCount")){
+                    consecutive++;code=now-suspectAt>=confirmDelay?Code.CONFIRMED_FAILED:Code.SUSPECT;
+                }
                 else{consecutive=1;suspectAt=now;code=Code.SUSPECT;}
                 lastMask=result.failedMask;
             }else if((result.failedMask&6)!=0){
-                if(consecutive>0&&lastMask==result.failedMask&&now>=suspectAt&&now-suspectAt>=confirmDelay){consecutive++;code=Code.CONFIRMED_PARTIAL_FAILED;}
+                if(consecutive>0&&lastMask==result.failedMask&&now>=suspectAt){consecutive++;code=now-suspectAt>=confirmDelay?Code.CONFIRMED_PARTIAL_FAILED:Code.SERVICE_PATH_SUSPECT;}
                 else{consecutive=1;suspectAt=now;code=Code.SERVICE_PATH_SUSPECT;}
                 lastMask=result.failedMask;
             }else{consecutive=lastMask=0;suspectAt=0;lastSuccess=now;code=Code.HEALTHY;}
             emit(captured,code,now,result.failedMask,result.latencyMillis);
             // A confirmed result is consumed by recovery; do not repeatedly interrupt that recovery.
             if(code!=Code.CONFIRMED_FAILED&&code!=Code.CONFIRMED_PARTIAL_FAILED){schedule(code==Code.SUSPECT||code==Code.SERVICE_PATH_SUSPECT?confirmDelay:accelerate?ProductContract.policyLong("nativeBurstDelayMs"):interval);accelerate=false;}
+            else if(resumed&&next==null)schedule(interval);
         }
     }
     private synchronized void emit(Snapshot captured,Code code,long now,int failed,int latency){if(!closed&&captured.equals(active))sink.accept(new Observation(captured,code,now,lastSuccess,failed,consecutive,latency));}
