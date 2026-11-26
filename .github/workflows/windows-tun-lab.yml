@@ -1,0 +1,44 @@
+# Canonical source. Publish to .github/workflows/windows-tun-lab.yml only after source review.
+name: Disposable Windows TUN lab
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-tun-lab-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scoped-tun:
+    if: github.repository == 'gohrayson/autopilot-android' && github.event_name == 'workflow_dispatch' && github.event.repository.private == false
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout only the lab fixture
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /tools/windows-tun-lab.ps1
+            /android/tools/windows-tun-lab.ps1
+      - name: Probe pinned native Windows driver, scoped routes and data plane
+        id: lab
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidates = @(@('tools/windows-tun-lab.ps1', 'android/tools/windows-tun-lab.ps1') | Where-Object { Test-Path -LiteralPath $_ })
+          if ($candidates.Count -ne 1) { throw 'Expected exactly one source-reviewed lab script.' }
+          & $candidates[0] -DisposableRunner
+      - name: Preserve scoped evidence even on a failed driver gate
+        if: always() && steps.lab.outputs.results_path != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-tun-lab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.lab.outputs.results_path }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
