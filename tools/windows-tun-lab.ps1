@@ -153,6 +153,14 @@ function Invoke-CoreApi([string]$Method, [string]$Resource, [string]$Body = '') 
 function Get-OwnedAdapter([string]$Name) {
     return ,@(Get-NetAdapter -IncludeHidden | Where-Object { $_.Name -ceq $Name })
 }
+function Test-OwnedSignedDriver([string]$PnpDeviceId, [object[]]$Rows) {
+    if ([string]::IsNullOrWhiteSpace($PnpDeviceId)) { return $false }
+    # Windows/WMI device identifiers are full strings with case-insensitive
+    # equality. The GUID and every separator still have to match; no prefix or
+    # substring match is accepted. WMI may uppercase the adapter's "Wintun".
+    $matches = @($Rows | Where-Object { [string]::Equals([string]$_.DeviceID, $PnpDeviceId, [StringComparison]::OrdinalIgnoreCase) })
+    return $matches.Count -eq 1 -and $matches[0].IsSigned -and $matches[0].DriverProviderName -match 'WireGuard'
+}
 function Remove-OwnedRoutes {
     foreach ($route in $ownedRoutes) {
         if ($route.Cleaned) { continue }
@@ -415,6 +423,7 @@ public sealed class TunLabFixture : IDisposable {
         # record scoped observations so a failed gate has an inspectable cause.
         $driverObservation = [ordered]@{ phase = $phase; adapterPnpDeviceId = $adapter.Pnp;
             exactIdentityRequired = $true; signatureRequired = $true; providerRequired = 'WireGuard';
+            identityComparison = 'OrdinalIgnoreCase';
             attempts = @(); status = 'FAILED' }
         $receipt.driverObservations += $driverObservation
         $driverWait = [Diagnostics.Stopwatch]::StartNew()
@@ -430,12 +439,12 @@ public sealed class TunLabFixture : IDisposable {
                 Start-Sleep -Milliseconds 300
                 continue
             }
-            $drivers = @($inventory | Where-Object { $_.DeviceID -ceq $adapter.Pnp })
+            $drivers = @($inventory | Where-Object { [string]::Equals([string]$_.DeviceID, $adapter.Pnp, [StringComparison]::OrdinalIgnoreCase) })
             $scopedRows = @($inventory | Where-Object { $_.DeviceID -ieq $adapter.Pnp -or $_.DriverProviderName -match 'WireGuard' -or $_.DeviceID -match '^SWD\\WINTUN\\' } |
                 Select-Object DeviceID, IsSigned, DriverProviderName, DriverVersion, InfName, Signer)
             $driverObservation.attempts += [ordered]@{ elapsedMs = [int]$driverWait.ElapsedMilliseconds;
-                exactMatchCount = $drivers.Count; scopedDrivers = $scopedRows }
-            if ($drivers.Count -eq 1 -and $drivers[0].IsSigned -and $drivers[0].DriverProviderName -match 'WireGuard') {
+                fullIdentityMatchCount = $drivers.Count; caseSensitiveMatchCount = @($inventory | Where-Object { $_.DeviceID -ceq $adapter.Pnp }).Count; scopedDrivers = $scopedRows }
+            if (Test-OwnedSignedDriver $adapter.Pnp $inventory) {
                 $driverObservation.status = 'PASS'
                 break
             }
