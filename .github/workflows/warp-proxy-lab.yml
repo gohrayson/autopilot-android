@@ -1,0 +1,38 @@
+# Canonical source. Public copy: .github/workflows/warp-proxy-lab.yml.
+name: Disposable WARP proxy boot lab
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: warp-proxy-lab-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  proxy-before-registration:
+    if: github.repository == 'gohrayson/autopilot-android' && github.event_name == 'workflow_dispatch' && github.event.repository.private == false
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout only the reviewed synthetic fixture
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /tools/warp-proxy-lab.ps1
+      - name: Verify official first boot is proxy-only before registration
+        id: lab
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path -LiteralPath 'tools/warp-proxy-lab.ps1' -PathType Leaf)) { throw 'Reviewed fixture missing.' }
+          & './tools/warp-proxy-lab.ps1' -DisposableRunner
+      - name: Preserve redacted mode and invariant evidence
+        if: always() && steps.lab.outputs.results_path != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: warp-proxy-lab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.lab.outputs.results_path }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
