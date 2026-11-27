@@ -86,7 +86,7 @@ $receipt = [ordered]@{
     runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; commit = $env:GITHUB_SHA
     runnerImage = $env:ImageOS; runnerImageVersion = $env:ImageVersion; startedAt = [DateTime]::UtcNow.ToString('o')
     defaultRouteCoverage = $false; hostDnsConfigurationCoverage = $false; productionBrokerCoverage = $false
-    stages = @(); cleanup = @(); errors = @()
+    stages = @(); cleanup = @(); errors = @(); driverObservations = @()
 }
 $ownedChildren = [Collections.Generic.List[object]]::new()
 $ownedRoutes = [Collections.Generic.List[object]]::new()
@@ -410,8 +410,29 @@ public sealed class TunLabFixture : IDisposable {
         }
         $addresses = @(Get-NetIPAddress -InterfaceIndex $adapter.Index | ForEach-Object { $_.IPAddress })
         if ('203.0.113.1' -notin $addresses -or '2001:db8::1' -notin $addresses) { throw 'TUN did not receive both fixture-family addresses.' }
-        $drivers = @(Get-CimInstance Win32_PnPSignedDriver | Where-Object { $_.DeviceID -ceq $adapter.Pnp })
-        if ($drivers.Count -ne 1 -or -not $drivers[0].IsSigned -or $drivers[0].DriverProviderName -notmatch 'WireGuard') { throw 'Observed TUN driver is not a signed WireGuard PnP driver.' }
+        # The adapter can become Up before the signed-driver WMI inventory has
+        # converged. Keep the exact identity/signature/provider requirements;
+        # record scoped observations so a failed gate has an inspectable cause.
+        $driverObservation = [ordered]@{ phase = $phase; adapterPnpDeviceId = $adapter.Pnp;
+            exactIdentityRequired = $true; signatureRequired = $true; providerRequired = 'WireGuard';
+            attempts = @(); status = 'FAILED' }
+        $receipt.driverObservations += $driverObservation
+        $driverWait = [Diagnostics.Stopwatch]::StartNew()
+        $drivers = @()
+        do {
+            $inventory = @(Get-CimInstance Win32_PnPSignedDriver -OperationTimeoutSec 3)
+            $drivers = @($inventory | Where-Object { $_.DeviceID -ceq $adapter.Pnp })
+            $scopedRows = @($inventory | Where-Object { $_.DeviceID -ieq $adapter.Pnp -or $_.DriverProviderName -match 'WireGuard' -or $_.DeviceID -match '^SWD\\WINTUN\\' } |
+                Select-Object DeviceID, IsSigned, DriverProviderName, DriverVersion, InfName, Signer)
+            $driverObservation.attempts += [ordered]@{ elapsedMs = [int]$driverWait.ElapsedMilliseconds;
+                exactMatchCount = $drivers.Count; scopedDrivers = $scopedRows }
+            if ($drivers.Count -eq 1 -and $drivers[0].IsSigned -and $drivers[0].DriverProviderName -match 'WireGuard') {
+                $driverObservation.status = 'PASS'
+                break
+            }
+            Start-Sleep -Milliseconds 300
+        } while ($driverWait.Elapsed.TotalSeconds -lt 15)
+        if ($driverObservation.status -cne 'PASS') { throw 'Observed TUN driver is not a signed WireGuard PnP driver; read scoped driverObservations.' }
         if (@(Get-NetRoute -InterfaceIndex $adapter.Index -PolicyStore ActiveStore | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/0', '::/0', '0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1') }).Count) { throw 'Unexpected broad TUN route; scoped-route gate failed.' }
         foreach ($prefix in $prefixes) {
             $nextHop = if ($prefix -eq $prefixes[0]) { '0.0.0.0' } else { '::' }
