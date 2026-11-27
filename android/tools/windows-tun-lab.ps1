@@ -419,8 +419,17 @@ public sealed class TunLabFixture : IDisposable {
         $receipt.driverObservations += $driverObservation
         $driverWait = [Diagnostics.Stopwatch]::StartNew()
         $drivers = @()
+        $pnpFilterValue = $adapter.Pnp.Replace('\', '\\').Replace("'", "\'")
         do {
-            $inventory = @(Get-CimInstance Win32_PnPSignedDriver -OperationTimeoutSec 3)
+            # Query only the owned device. Enumerating every host driver is both
+            # unnecessary and too slow for a short cold-start WMI timeout.
+            try { $inventory = @(Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceID = '$pnpFilterValue'" -OperationTimeoutSec 15) }
+            catch {
+                $driverObservation.attempts += [ordered]@{ elapsedMs = [int]$driverWait.ElapsedMilliseconds; queryError = $_.Exception.Message }
+                if ($driverWait.Elapsed.TotalSeconds -ge 15) { break }
+                Start-Sleep -Milliseconds 300
+                continue
+            }
             $drivers = @($inventory | Where-Object { $_.DeviceID -ceq $adapter.Pnp })
             $scopedRows = @($inventory | Where-Object { $_.DeviceID -ieq $adapter.Pnp -or $_.DriverProviderName -match 'WireGuard' -or $_.DeviceID -match '^SWD\\WINTUN\\' } |
                 Select-Object DeviceID, IsSigned, DriverProviderName, DriverVersion, InfName, Signer)
